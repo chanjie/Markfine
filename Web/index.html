@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; style-src 'self' 'unsafe-inline'; img-src markfine: data:; font-src 'none'; connect-src 'none'; object-src 'none'; frame-src 'none'; media-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Markfine</title><link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="toolbar">
+    <span class="wordmark">Markfine<span aria-hidden="true">.</span></span>
+    <div class="tools"><button id="new" title="新建 ⌘N">新建</button><button id="open" title="打开 ⌘O">打开…</button><span class="tool-divider"></span><button id="save" class="primary" title="保存 ⌘S">保存</button></div>
+    <span id="build-label" class="build-label"></span>
+  </header>
+  <nav id="tabs" class="tabs" role="tablist" aria-label="文档标签页"></nav>
+  <section id="find-panel" class="find-panel" aria-label="查找与替换" hidden>
+    <div class="find-row"><label for="query">查找</label><input id="query" type="text" placeholder="在当前文档中查找" autocomplete="off"><span id="matches"></span><button id="find-previous" title="上一个 ⇧⌘G">↑</button><button id="find-next" title="下一个 ⌘G">↓</button><button id="close-find" title="关闭 Esc">×</button></div>
+    <div id="replace-row" class="find-row" hidden><label for="replacement">替换</label><input id="replacement" type="text" placeholder="替换为" autocomplete="off"><button id="replace-one">替换</button><button id="replace-all">全部替换</button></div>
+  </section>
+  <div id="notice" class="notice" role="status" hidden><span id="notice-text"></span><button id="dismiss-notice" aria-label="收起提示">×</button></div>
+  <div id="paste-progress" class="paste-progress" role="status" hidden><span class="activity" aria-hidden="true"></span><span id="paste-label"></span><button id="cancel-paste">取消</button></div>
+  <main><div id="editor"></div><section id="empty" class="empty"><span class="empty-mark" aria-hidden="true">M.</span><h1>让文字回到文字。</h1><p>⌘N 开始写作 · ⌘O 打开 Markdown</p><small>本地文件，属于你。</small></section></main>
+  <footer><span id="status" role="status"></span><span id="count">Markdown · UTF-8</span></footer>
+  <dialog id="close-dialog"><div class="dialog-rule"></div><h2 id="close-title"></h2><p>未保存的更改会在放弃后丢失。</p><div class="dialog-actions"><button data-choice="discard">不保存</button><span></span><button data-choice="cancel" autofocus>取消</button><button data-choice="save" class="primary">保存</button></div></dialog>
+</body>
+</html>
