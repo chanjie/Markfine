@@ -117,7 +117,7 @@ export function projectSource(source: string, root: SyntaxBranch, base: number, 
         if (value.startsWith(' ') && value.endsWith(' ') && /[^ ]/.test(value)) { from++; to--; }
         // Offsets remain linear for normalized newlines. Container-prefix differences fail the text check safely.
         text(source.slice(from, to).replace(/\n/g, ' '), from, to);
-      } else if (child.name === 'HTMLTag') {
+      } else if (child.name === 'HTMLTag' || child.name === 'Comment') {
         text(raw(child), child.from - base, child.to - base); // html:false displays literal source, not active markup.
       } else content(child);
     }
@@ -159,7 +159,9 @@ export function projectSource(source: string, root: SyntaxBranch, base: number, 
   function collect(node: SyntaxBranch) {
     if (node.name === 'Paragraph' || node.name === 'Task' || /^(?:ATXHeading[1-6]|SetextHeading[12])$/.test(node.name)) {
       groups.push(inline(node, 'inline'));
-    } else if (node.name === 'TableCell') groups.push(inline(node, 'table'));
+    } else if (node.name === 'CommentBlock') groups.push({ kind: 'inline', line: lineAt(node.from - base), from: node.from - base, to: node.to - base,
+      pieces: [{ kind: 'text', text: raw(node), from: node.from - base, to: node.to - base, linear: true, trim: false }] });
+    else if (node.name === 'TableCell') groups.push(inline(node, 'table'));
     else if (node.name === 'FencedCode' || node.name === 'CodeBlock') groups.push(code(node));
     else for (let child = node.firstChild; child; child = child.nextSibling) collect(child);
   }
@@ -190,7 +192,7 @@ function matchGroup(tokens: readonly MappingToken[], group: ProjectionGroup): { 
     return segments;
   }
   for (const token of tokens) {
-    if (token.type === 'text' || token.type === 'code_inline' || token.type === 'code_block' || token.type === 'fence') {
+    if (token.type === 'text' || token.type === 'code_inline' || token.type === 'code_block' || token.type === 'fence' || token.type === 'markfine_comment' || token.type === 'markfine_comment_block') {
       const segments = consume(token.content);
       if (segments === null) return null;
       if (segments.length) annotations.push({ token, meta: { spikeSegments: segments } });
@@ -213,8 +215,8 @@ export function annotateSourceMaps(tokens: readonly MappingToken[], projection: 
   for (const token of tokens) {
     if (token.type === 'tr_open') { tableLine = token.map?.[0] ?? null; tableColumn = 0; }
     if (token.type === 'tr_close') tableLine = null;
-    if (token.type !== 'inline' && token.type !== 'code_block' && token.type !== 'fence') continue;
-    const kind = token.type !== 'inline' ? 'code' : token.map ? 'inline' : 'table';
+    if (token.type !== 'inline' && token.type !== 'code_block' && token.type !== 'fence' && token.type !== 'markfine_comment_block') continue;
+    const kind = token.type === 'markfine_comment_block' ? 'inline' : token.type !== 'inline' ? 'code' : token.map ? 'inline' : 'table';
     const line = token.map?.[0] ?? tableLine;
     const candidates = projection.groups.filter(group => group.kind === kind && group.line === line);
     const group = kind === 'table' ? candidates[tableColumn++] : candidates.find(candidate => !used.has(candidate));

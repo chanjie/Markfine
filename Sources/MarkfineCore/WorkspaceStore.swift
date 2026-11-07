@@ -7,6 +7,7 @@ public struct WorkspaceEntry: Codable, Sendable {
     public let name: String
     public let directory: Bool
     public let markdown: Bool
+    public let modified: Double?
 }
 public struct WorkspaceSnapshot: Codable, Sendable {
     public let generation: String
@@ -31,10 +32,10 @@ public actor WorkspaceStore {
         root = canonical; generation = UUID().uuidString; entries.removeAll(); identifiers.removeAll()
         return WorkspaceSnapshot(generation: generation, root: item(canonical, directory: true))
     }
-    private func item(_ url: URL, directory: Bool) -> WorkspaceEntry {
+    private func item(_ url: URL, directory: Bool, modified: Double? = nil) -> WorkspaceEntry {
         let id = identifiers[url.path] ?? UUID().uuidString
         identifiers[url.path] = id; entries[id] = url
-        return WorkspaceEntry(id: id, name: url.lastPathComponent, directory: directory, markdown: !directory && Self.isMarkdown(url))
+        return WorkspaceEntry(id: id, name: url.lastPathComponent, directory: directory, markdown: !directory && Self.isMarkdown(url), modified: modified)
     }
     private func checked(_ id: String, generation: String) throws -> URL {
         guard generation == self.generation, let root, let url = entries[id] else { throw WorkspaceFailure.stale }
@@ -68,7 +69,7 @@ public actor WorkspaceStore {
             let child = url.appendingPathComponent(name)
             let package = ["app", "bundle", "framework", "photoslibrary"].contains(child.pathExtension.lowercased())
             let directory = info.st_mode & S_IFMT == S_IFDIR && !package
-            if directory || showAll || Self.isMarkdown(child) { result.append(item(child, directory: directory)) }
+            if directory || showAll || Self.isMarkdown(child) { result.append(item(child, directory: directory, modified: Double(info.st_mtimespec.tv_sec) * 1000 + Double(info.st_mtimespec.tv_nsec) / 1_000_000)) }
         }
         return result.sorted { a, b in a.directory != b.directory ? a.directory : a.name.localizedStandardCompare(b.name) == .orderedAscending }
     }
@@ -77,6 +78,18 @@ public actor WorkspaceStore {
         let fd = try directoryFD(url.deletingLastPathComponent()); defer { Darwin.close(fd) }
         var info = stat(); guard fstatat(fd, url.lastPathComponent, &info, AT_SYMLINK_NOFOLLOW) == 0, info.st_mode & S_IFMT == S_IFREG else { throw WorkspaceFailure.denied }
         return url
+    }
+    /// Refresh only already-displayed opaque entries. No recursive scan or content reads.
+    public func modificationDates(_ ids: [String], generation: String) throws -> [String: Double] {
+        guard generation == self.generation, ids.count <= 4096 else { throw WorkspaceFailure.stale }
+        var result: [String: Double] = [:]
+        for id in Set(ids) {
+            guard let url = entries[id] else { throw WorkspaceFailure.denied }
+            let fd = try directoryFD(url.deletingLastPathComponent()); defer { Darwin.close(fd) }
+            var info = stat()
+            if fstatat(fd, url.lastPathComponent, &info, AT_SYMLINK_NOFOLLOW) == 0 { result[id] = Double(info.st_mtimespec.tv_sec) * 1000 + Double(info.st_mtimespec.tv_nsec) / 1_000_000 }
+        }
+        return result
     }
     /// Re-check after document I/O, so a root/ancestor replacement cannot swap the selected object.
     public func verifyFile(_ id: String, generation: String, identity: FileIdentity) throws {

@@ -22,7 +22,13 @@ struct MarkfineMain {
             application.delegate = delegate
             withExtendedLifetime(delegate) { application.run() }
         } catch {
-            fputs("Markfine: \(error)\n", stderr)
+            let event = DiagnosticEvent("launchFailure", level: "critical", error: error)
+            let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown", session = UUID().uuidString
+            var recorded = false
+            if Bundle.main.bundleURL.pathExtension == "app", !(error is LaunchFailure),
+               let base = try? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true),
+               let runtime = try? RuntimeDataStore(url: base.appendingPathComponent("Markfine/Runtime", isDirectory: true)) { recorded = runtime.record(event, version: version, session: session) }
+            if !recorded, let data = event.data(version: version, session: session) { FileHandle.standardError.write(data) }
             exit(error is LaunchFailure ? 2 : 1)
         }
     }

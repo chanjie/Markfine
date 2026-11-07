@@ -14,6 +14,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     private let workspace = WorkspaceStore()
     private let locationOpenQueue = LocationOpenQueue()
     private let recent = RecentLocations()
+    private let positions = ReadingPositions()
+    private var pendingPositions: [String: ReadingPosition] = [:]
+    private var recentIDs: [String: URL] = [:]
+    private var runtime: RuntimeDataStore!
     private var recentMenu: NSMenu?
     private var latestWorkspaceRequest: String?
     private var unsupportedFiles: [String: URL] = [:]
@@ -37,6 +41,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     private var ruleRoot: URL?
     private let settings = ApplicationSettings()
     private lazy var preferencesController = PreferencesController(settings: settings)
+    private lazy var outputController = DocumentOutputController(settings: settings)
+    private let notifications = ExportNotifications()
     private var preferences: [String: Any] { settings.values }
     private var readingEnabled = false
     private func l(_ text: String) -> String {
@@ -54,11 +60,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     private func start() async throws {
         let base = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
             .appendingPathComponent("Markfine", isDirectory: true)
+        runtime = try RuntimeDataStore(url: base.appendingPathComponent("Runtime", isDirectory: true))
+        notifications.diagnostic = { [weak self] event, error in self?.record(event, error, level: "warning") }
         images = try ImageStore(root: base.appendingPathComponent("Staging", isDirectory: true), sessionID: sessionID)
         await images.cleanStaleSessions()
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
-        configuration.setURLSchemeHandler(EditorScheme(resources: resources, images: images), forURLScheme: "markfine")
+        // This WebView displays only our offline page, never browses the web. Disable the
+        // optional website-reputation lookup service; CSP and native navigation gates stay on.
+        configuration.preferences.isFraudulentWebsiteWarningEnabled = false
+        configuration.setURLSchemeHandler(EditorScheme(resources: resources, images: images, diagnostic: { [weak self] error in self?.record("resourceReadFailure", error) }), forURLScheme: "markfine")
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         configuration.userContentController.add(self, contentWorld: world, name: "markfine")
         let context: [String: Any] = ["protocolVersion": 1, "sessionID": sessionID, "capability": capability]
@@ -72,7 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         webView.allowsMagnification = false
         webView.addGestureRecognizer(NSMagnificationGestureRecognizer(target: self, action: #selector(magnifyContent(_:))))
         configureWindow(); configureMenu(); updateBackground()
-        let cache = FileManager.default.temporaryDirectory.appendingPathComponent("Markfine-rules-" + UUID().uuidString, isDirectory: true)
+        let cache = try runtime.startSession()
         try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
         ruleRoot = cache
         let rules = """
@@ -92,8 +103,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     }
 
     private func configureWindow() {
-        let window = NSWindow(contentRect: webView.frame, styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.title = "Markfine"
+        let window = NSWindow(contentRect: webView.frame, styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+        window.title = ""
         window.titlebarAppearsTransparent = true
         window.titlebarSeparatorStyle = .none
         window.backgroundColor = NSColor(name: nil) { appearance in
@@ -114,6 +125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         let app = menu("Markfine")
         app.addItem(withTitle: l("关于 Markfine"), action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         add("首选项…", key: ",", action: "preferences", to: app)
+        add(settings.text("缓存清理…", "Clear App Data…"), key: "", action: "clearCache", to: app)
         app.addItem(.separator())
         app.addItem(withTitle: l("隐藏 Markfine"), action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         app.addItem(.separator())
@@ -125,6 +137,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         let recentItem = NSMenuItem(title: settings.text("打开最近", "Open Recent"), action: nil, keyEquivalent: "")
         let recentMenu = NSMenu(); recentItem.submenu = recentMenu; file.addItem(recentItem); self.recentMenu = recentMenu; updateRecentMenu()
         file.addItem(.separator()); add("保存", key: "s", action: "save", to: file)
+        add(settings.text("导出…", "Export…"), key: "e", modifiers: [.command, .shift], action: "export", to: file)
+        add(settings.text("打印…", "Print…"), key: "p", action: "print", to: file)
         file.addItem(.separator()); add("关闭标签页", key: "w", action: "close", to: file)
         add("关闭窗口", key: "w", modifiers: [.command, .shift], action: "closeWindow", to: file)
         let edit = menu("编辑")
@@ -136,8 +150,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         }
         add("粘贴", key: "v", action: "paste", to: edit)
         edit.addItem(.separator())
+        add(settings.text("删除整行", "Delete Line"), key: "k", modifiers: [.command, .shift], action: "deleteLine", to: edit)
+        add(settings.text("删除整段", "Delete Paragraph"), key: "k", modifiers: [.command, .option, .shift], action: "deleteParagraph", to: edit)
+        edit.addItem(.separator())
         add("查找", key: "f", action: "find", to: edit)
-        add("显示替换", key: "f", modifiers: [.command, .option], action: "replace", to: edit)
         add("下一个匹配", key: "g", action: "findNext", to: edit)
         add("上一个匹配", key: "g", modifiers: [.command, .shift], action: "findPrevious", to: edit)
         let format = menu("格式")
@@ -157,6 +173,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         add("显示／隐藏目录", key: "l", modifiers: [.command, .shift], action: "toggleOutline", to: view)
         add("阅读／编辑模式", key: "r", modifiers: [.command, .shift], action: "toggleReading", to: view)
         add("源码模式", key: "/", action: "toggleSource", to: view)
+        add(settings.text("专注模式", "Focus Mode"), key: "", action: "toggleFocus", to: view)
+        view.items.last?.state = preferences["focusMode"] as? Bool == true ? .on : .off
         add("显示／隐藏行号", key: "n", modifiers: [.command, .shift], action: "toggleLineNumbers", to: view)
         view.addItem(.separator())
         add("放大内容", key: "=", action: "zoomIn", to: view)
@@ -168,7 +186,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         windows.addItem(withTitle: l("最小化"), action: #selector(NSWindow.miniaturize(_:)), keyEquivalent: "m")
         add("下一标签页", key: "\t", modifiers: .control, action: "nextTab", to: windows)
         add("上一标签页", key: "\t", modifiers: [.control, .shift], action: "previousTab", to: windows)
-        let help = menu("帮助"); add("快捷键说明", key: "?", action: "help", to: help); NSApp.helpMenu = help
+        let help = menu("帮助"); add(settings.text("Markfine 帮助", "Markfine Help"), key: "", action: "userGuide", to: help)
+        add("快捷键说明", key: "?", action: "help", to: help); NSApp.helpMenu = help
         NSApp.mainMenu = main; NSApp.windowsMenu = windows
     }
 
@@ -181,6 +200,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         guard let action = item.representedObject as? String else { return }
         if (action == "close" || action == "closeWindow"), preferencesController.closeIfKey() { return }
         if action == "clearRecent" { recent.clear(); updateRecentMenu(); return }
+        if action == "clearCache" {
+            guard let window, let runtime else { return }
+            CacheCleanupController.show(window: window, runtime: runtime, settings: settings, recent: recent, positions: positions) { [weak self] clearedPositions in
+                guard let self else { return }; self.preferencesChanged(); self.updateRecentMenu()
+                if clearedPositions { self.pendingPositions.removeAll(); self.emit(["kind": "clearPositions"]) }
+                self.notice(self.settings.text("已清理可清理的所选数据，使用中的依赖已保留。", "Selected removable app data cleared. Active dependencies were kept."))
+            }; return
+        }
         if action == "preferences" { showPreferences() }
         else if action == "closeWindow" { window?.performClose(nil) }
         else {
@@ -207,15 +234,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     private func setReadingMode(_ enabled: Bool) {
         readingEnabled = enabled
         guard let window else { return }
-        if enabled { window.styleMask.insert(.fullSizeContentView) } else { window.styleMask.remove(.fullSizeContentView) }
+        // Keep one native content geometry for the lifetime of the window. Toggling the style
+        // mask changes AppKit's layout guide and can strand the WebView under the traffic lights.
         window.titleVisibility = enabled ? .hidden : .visible
         for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] { window.standardWindowButton(button)?.isHidden = enabled }
         updateBackground()
     }
     private func updateBackground() {
+        let appearance = preferences["appearance"] as? String ?? "system"
+        NSApp.appearance = appearance == "dark" ? NSAppearance(named: .darkAqua) : appearance == "light" ? NSAppearance(named: .aqua) : nil
         let theme = preferences[readingEnabled ? "readTheme" : "editTheme"] as? String ?? "paper"
-        let color: NSColor = theme == "kraft" ? NSColor(srgbRed: 0.945, green: 0.886, blue: 0.776, alpha: 1) :
-            theme == "eye" ? NSColor(srgbRed: 0.898, green: 0.933, blue: 0.890, alpha: 1) : NSColor(srgbRed: 0.984, green: 0.980, blue: 0.969, alpha: 1)
+        let color = NSColor(name: nil) { appearance in
+            if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua { return NSColor(srgbRed: 0.102, green: 0.118, blue: 0.110, alpha: 1) }
+            return theme == "kraft" ? NSColor(srgbRed: 0.945, green: 0.886, blue: 0.776, alpha: 1) : theme == "eye" ? NSColor(srgbRed: 0.898, green: 0.933, blue: 0.890, alpha: 1) : NSColor(srgbRed: 0.984, green: 0.980, blue: 0.969, alpha: 1)
+        }
         window?.backgroundColor = color; webView.underPageBackgroundColor = color
     }
     private func openLink(_ command: [String: Any]) {
@@ -227,7 +259,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
                 guard values.isRegularFile == true, values.isPackage != true, values.contentType?.conforms(to: .executable) != true else { throw ExternalLinkFailure.executable }
             }
             if !NSWorkspace.shared.open(target) { throw ExternalLinkFailure.unavailable }
-        } catch { notice(settings.text("无法打开链接：文件不存在、路径无效或目标不安全。", "Cannot open link: the file is missing, the path is invalid, or the destination is unsafe.")) }
+        } catch { record("externalLinkRejected", error, level: "warning"); notice(settings.text("无法打开链接：文件不存在、路径无效或目标不安全。", "Cannot open link: the file is missing, the path is invalid, or the destination is unsafe.")) }
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -242,6 +274,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     private func initializeEditor() async throws {
         let info = try JSONSerialization.jsonObject(with: JSONEncoder().encode(resources.info))
         _ = try await deliver(["kind": "initialize", "build": info, "preferences": preferences])
+        sendRecentLocations()
         let urls = pendingURLs; pendingURLs.removeAll()
         for url in urls { await openLocation(url) }
         initialLoadFinished = true
@@ -256,7 +289,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         try await images.register(metadata.id, url: metadata.url)
         if let markdown = loaded.markdown {
             states[metadata.id] = (0, false, false)
-            _ = try await deliver(["kind": "load", "documentID": metadata.id, "title": metadata.title, "path": metadata.url?.path ?? "", "markdown": markdown, "preview": preview, "openRequestID": openRequestID])
+            var payload: [String: Any] = ["kind": "load", "documentID": metadata.id, "title": metadata.title, "path": metadata.url?.path ?? "", "markdown": markdown, "preview": preview, "openRequestID": openRequestID]
+            if let url = metadata.url, let position = positions.position(for: url) { payload["resume"] = ["mode": position.mode, "line": position.line, "fraction": position.fraction] }
+            _ = try await deliver(payload)
         } else { _ = try await deliver(["kind": "activate", "documentID": metadata.id, "pin": !preview, "openRequestID": openRequestID]) }
     }
     private func createDocument() async {
@@ -267,9 +302,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     private func openDocument(_ url: URL) async {
         guard closeRequest == nil else { notice(settings.text("请先完成当前关闭操作", "Finish the current close operation first")); return }
         opening += 1; defer { opening -= 1 }
-        do { try await register(store.open(url)) } catch { notice(settings.text("无法打开文档：", "Cannot open document: ") + l(String(describing: error))) }
+        do { try await register(store.open(url)) } catch { record("documentOpenFailure", error); notice(settings.text("无法打开文档：", "Cannot open document: ") + l(String(describing: error))) }
     }
     private func updateRecentMenu() {
+        sendRecentLocations()
         guard let menu = recentMenu else { return }; menu.removeAllItems()
         for url in recent.urls {
             let item = NSMenuItem(title: url.lastPathComponent + " — " + url.deletingLastPathComponent().lastPathComponent, action: #selector(menuCommand(_:)), keyEquivalent: "")
@@ -277,6 +313,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         }
         if menu.items.isEmpty { let item = NSMenuItem(title: settings.text("暂无最近记录", "No recent locations"), action: nil, keyEquivalent: ""); item.isEnabled = false; menu.addItem(item) }
         menu.addItem(.separator()); add(settings.text("清空最近记录", "Clear Recent"), key: "", action: "clearRecent", to: menu)
+    }
+    private func sendRecentLocations() {
+        guard ready else { return }; recentIDs.removeAll()
+        let items: [[String: String]] = recent.urls.map { url in let id = UUID().uuidString; recentIDs[id] = url; return ["id": id, "name": url.lastPathComponent, "path": url.path] }
+        emit(["kind": "recentLocations", "items": items])
     }
     private func openLocation(_ url: URL, preview: Bool = false, requestID: String = "", workspaceEntry: (id: String, generation: String)? = nil) async {
         guard closeRequest == nil else { return }
@@ -315,6 +356,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
             }
             recent.note(url); updateRecentMenu()
         } catch {
+            record("locationOpenFailure", error)
             if !requestID.isEmpty && latestWorkspaceRequest != requestID { return }
             if !requestID.isEmpty { emit(["kind": "openFailed", "openRequestID": requestID]) }
             notice(settings.text("无法打开文件或文件夹：", "Cannot open file or folder: ") + l(String(describing: error)))
@@ -325,14 +367,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
             let entries = try await workspace.children(command["folderID"] as! String, generation: command["generation"] as! String, showAll: command["showAll"] as! Bool)
             let value = try JSONSerialization.jsonObject(with: JSONEncoder().encode(entries))
             emit(["kind": "workspaceChildren", "folderID": command["folderID"]!, "generation": command["generation"]!, "requestID": command["requestID"]!, "entries": value])
-        } catch { emit(["kind": "workspaceChildren", "folderID": command["folderID"]!, "generation": command["generation"]!, "requestID": command["requestID"]!, "entries": [], "error": settings.text("目录不可用或已改变", "Folder unavailable or changed")]) }
+        } catch { record("workspaceReadFailure", error); emit(["kind": "workspaceChildren", "folderID": command["folderID"]!, "generation": command["generation"]!, "requestID": command["requestID"]!, "entries": [], "error": settings.text("目录不可用或已改变", "Folder unavailable or changed")]) }
     }
     private func openWorkspaceEntry(_ command: [String: Any]) async {
         let request = command["requestID"] as! String
         do {
             let url = try await workspace.file(command["entryID"] as! String, generation: command["generation"] as! String)
             if latestWorkspaceRequest == request { await openLocation(url, preview: true, requestID: request, workspaceEntry: (command["entryID"] as! String, command["generation"] as! String)) }
-        } catch { if latestWorkspaceRequest == request { emit(["kind": "openFailed", "openRequestID": request]); notice(settings.text("文件不存在、无权限或链接越界", "File missing, inaccessible or outside the chosen folder")) } }
+        } catch { record("workspaceOpenFailure", error); if latestWorkspaceRequest == request { emit(["kind": "openFailed", "openRequestID": request]); notice(settings.text("文件不存在、无权限或链接越界", "File missing, inaccessible or outside the chosen folder")) } }
     }
     private func chooseOpen() async {
         guard let window, closeRequest == nil else { return }
@@ -392,10 +434,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
             receipt["savedAt"] = Date().timeIntervalSince1970 * 1000
             if let url = saved.url {
                 do { try await images.setURL(id, url: url) }
-                catch { receipt["error"] = settings.text("正文已保存，但图片预览上下文未更新：", "Document saved, but the image preview context could not be updated: ") + l(String(describing: error)) }
+                catch { record("imageContextFailure", error); receipt["error"] = settings.text("正文已保存，但图片预览上下文未更新：", "Document saved, but the image preview context could not be updated: ") + l(String(describing: error)) }
             }
             updateWindowTitle()
         } catch {
+            record("documentSaveFailure", error)
             receipt["error"] = l(String(describing: error))
             if let failure = error as? FileStoreFailure {
                 if failure == .externalChange || failure == .targetAlreadyOpen { receipt["outcome"] = "conflict" }
@@ -429,7 +472,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
                 if let reference = result.reference { receipt["reference"] = reference }
                 if let text = result.text { receipt["text"] = text }
             } catch is CancellationError { receipt["outcome"] = "cancelled" }
-            catch { receipt["error"] = self.l(String(describing: error)) }
+            catch { self.record("imagePasteFailure", error); receipt["error"] = self.l(String(describing: error)) }
             guard self.pasteTask?.id == requestID else { return }
             self.pasteTask = nil
             self.emit(receipt)
@@ -440,14 +483,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     private func closeDocument(_ command: [String: Any]) async {
         let id = command["documentID"] as! String, request = command["requestID"] as! String, revision = command["revision"] as! Int
         var approved = false
-        if !saving.contains(id), pasteTask?.documentID != id, states[id]?.revision == revision, states[id]?.pending == false {
-            do { if unsupportedFiles[id] != nil { unsupportedFiles[id] = nil } else { try await store.closeDocument(id); await images.closeDocument(id) }; documents[id] = nil; states[id] = nil; approved = true }
-            catch { notice(l(String(describing: error))) }
+        if !saving.contains(id), !outputController.busy, pasteTask?.documentID != id, states[id]?.revision == revision, states[id]?.pending == false {
+            do { if unsupportedFiles[id] != nil { unsupportedFiles[id] = nil } else { try await store.closeDocument(id); rememberClosedPosition(id); await images.closeDocument(id) }; documents[id] = nil; states[id] = nil; pendingPositions[id] = nil; approved = true }
+            catch { record("documentCloseFailure", error); notice(l(String(describing: error))) }
         }
         emit(["kind": "closeReceipt", "documentID": id, "requestID": request, "permitted": approved])
+        updateWindowTitle()
     }
     private func requestCloseAll(terminating: Bool) {
-        guard ready, opening == 0, saving.isEmpty, pasteTask == nil else { notice(settings.text("请先等待保存或图片任务完成，或取消图片任务，再关闭/退出", "Wait for saving or image processing, or cancel the image operation before closing / quitting")); return }
+        guard ready, opening == 0, saving.isEmpty, pasteTask == nil, !outputController.busy else { notice(settings.text("请先等待保存、图片或导出任务完成，再关闭/退出", "Wait for saving, image processing or document output before closing / quitting")); return }
         if let current = closeRequest { if terminating { closeRequest = (current.id, true) }; return }
         let request = UUID().uuidString; closeRequest = (request, terminating)
         emit(["kind": "hostCommand", "action": "closeAll", "requestID": request])
@@ -461,8 +505,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         if permitted {
             do {
                 try await store.closeDocuments(ids.filter { documents[$0] != nil })
+                for id in ids { rememberClosedPosition(id) }; pendingPositions.removeAll()
                 await images.finish(); documents.removeAll(); unsupportedFiles.removeAll(); states.removeAll()
-            } catch { permitted = false; notice(l(String(describing: error))) }
+            } catch { record("documentCloseAllFailure", error); permitted = false; notice(l(String(describing: error))) }
         }
         let terminating = closeRequest?.terminating ?? request.terminating
         closeRequest = nil
@@ -476,7 +521,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if closeApproved || (!ready && documents.isEmpty && opening == 0) { return .terminateNow }
-        guard opening == 0, saving.isEmpty, pasteTask == nil else { notice(settings.text("请先等待保存或图片任务完成，或取消图片任务", "Wait for saving or image processing, or cancel the image operation")); return .terminateCancel }
+        guard opening == 0, saving.isEmpty, pasteTask == nil, !outputController.busy else { notice(settings.text("请先等待保存、图片或导出任务完成", "Wait for saving, image processing or document output")); return .terminateCancel }
         requestCloseAll(terminating: true)
         return closeRequest == nil ? .terminateCancel : .terminateLater
     }
@@ -493,8 +538,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
                 Task { @MainActor in do { try await initializeEditor() } catch { fail("initializeFailure", error) } }
             case "new": Task { @MainActor in await createDocument() }
             case "open": Task { @MainActor in await chooseOpen() }
+            case "openRecent": if let url = recentIDs[command["entryID"] as! String] { Task { @MainActor in await openLocation(url) } }
+            case "rememberPosition":
+                pendingPositions[command["documentID"] as! String] = ReadingPosition(mode: command["mode"] as! String, line: command["line"] as! Int, fraction: command["fraction"] as! Double)
+            case "exportDocument": Task { @MainActor in await exportDocument(command) }
+            case "diagnostic": record("editor." + (command["event"] as! String))
+            case "zoomWindow": if readingEnabled { window?.performZoom(nil) }
             case "closeEmptyWindow": if documents.isEmpty && unsupportedFiles.isEmpty && initialLoadFinished { requestCloseAll(terminating: false) }
             case "workspaceChildren": Task { @MainActor in await workspaceChildren(command) }
+            case "workspaceMetadata": Task { @MainActor in
+                var dates: [String: Double] = [:]
+                do { dates = try await workspace.modificationDates(command["entryIDs"] as! [String], generation: command["generation"] as! String) }
+                catch { record("workspaceMetadataFailure", error) }
+                emit(["kind": "workspaceMetadata", "generation": command["generation"]!, "requestID": command["requestID"]!, "dates": dates])
+            }
             case "openWorkspaceEntry":
                 latestWorkspaceRequest = command["requestID"] as? String
                 Task { @MainActor in await openWorkspaceEntry(command) }
@@ -505,16 +562,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
                         let values = try target.resourceValues(forKeys: [.isRegularFileKey, .contentTypeKey])
                         guard values.isRegularFile == true, values.contentType?.conforms(to: .executable) != true else { throw ExternalLinkFailure.executable }
                         if !NSWorkspace.shared.open(target) { throw ExternalLinkFailure.unavailable }
-                    } catch { notice(settings.text("无法安全地打开此文件", "This file cannot be opened safely")) }
+                    } catch { record("unsupportedOpenRejected", error, level: "warning"); notice(settings.text("无法安全地打开此文件", "This file cannot be opened safely")) }
                 }
             case "readingMode": setReadingMode(command["enabled"] as! Bool)
             case "openLink": openLink(command)
             case "setPreference":
                 let key = command["key"] as! String
                 if settings.set(key, command["value"]!) {
-                    if key == "language" { configureMenu(); updateWindowTitle() }
+                    if key == "language" || key == "focusMode" { configureMenu(); updateWindowTitle() }
                     // The editor already applied its own validated change. Do not echo an older zoom snapshot over a live gesture.
-                    updateBackground(); if !["editZoom", "readZoom", "outlineWidth"].contains(key) { preferencesController.refresh() }
+                    updateBackground(); if !["editZoom", "readZoom", "outlineWidth", "leftWidth", "rightWidth"].contains(key) { preferencesController.refresh() }
                 }
             case "save": Task { @MainActor in await save(command) }
             case "state":
@@ -536,7 +593,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
                     Task { @MainActor in
                         switch result {
                         case .success: self?.emit(["kind": "mermaidReady"])
-                        case .failure(let error): self?.emit(["kind": "mermaidFailed", "error": String(describing: error)])
+                        case .failure(let error): self?.record("diagramRuntimeFailure", error); self?.emit(["kind": "mermaidFailed", "error": String(describing: error)])
                         }
                     }
                 }
@@ -549,12 +606,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     private func updateWindowTitle() {
         let metadata = activeDocumentID.flatMap { documents[$0] }
         let unsupported = activeDocumentID.flatMap { unsupportedFiles[$0] }
-        window?.title = metadata.map { ($0.url == nil ? l("未命名") : $0.title) + " — Markfine" } ?? unsupported.map { $0.lastPathComponent + " — Markfine" } ?? "Markfine"
+        window?.title = metadata.map { $0.url == nil ? l("未命名") : $0.title } ?? unsupported?.lastPathComponent ?? ""
         window?.representedURL = metadata?.url ?? unsupported
         window?.isDocumentEdited = activeDocumentID.flatMap { states[$0]?.dirty } ?? false
     }
     private func emit(_ fields: [String: Any]) {
         Task { @MainActor in do { _ = try await deliver(fields) } catch { fail("hostDeliveryFailure", error) } }
+    }
+    private func rememberClosedPosition(_ id: String) {
+        if let url = documents[id]?.url, let position = pendingPositions[id] { positions.note(position, for: url) }
+    }
+    private func exportDocument(_ command: [String: Any]) async {
+        let id = command["documentID"] as! String
+        guard let window, let metadata = documents[id], closeRequest == nil, pasteTask?.documentID != id, !outputController.busy else { return }
+        do {
+            let mode = command["mode"] as! String
+            let result = try await outputController.perform(window: window, documentURL: metadata.url, title: metadata.url == nil ? l("未命名") : metadata.title, printing: command["printing"] as! Bool, lineHeight: settings.lineHeight(reading: mode == "read", source: mode == "source"), confirmed: { await self.notifications.prepare() }, snapshot: {
+                guard let snapshot = try await self.evaluate("return await globalThis.markfine.exportSnapshot(id)", arguments: ["id": id]) as? [String: Any] else { throw BridgeFailure.malformed }; return snapshot
+            }, image: { reference in
+                let prefix = "markfine://app/image/" + id + "/"
+                guard reference.hasPrefix(prefix), let relative = String(reference.dropFirst(prefix.count)).removingPercentEncoding else { throw ImageStoreFailure.denied }
+                return try await self.images.read(documentID: id, relativePath: relative)
+            })
+            if case .exported(let url) = result { notice(settings.text("导出成功：", "Export complete: ") + url.lastPathComponent); await notifications.send(success: true, name: url.lastPathComponent, english: settings.english) }
+        } catch {
+            record("documentOutputFailure", error)
+            notice(settings.text("导出／打印未完成：请检查排版参数、字体、图片或输出位置。", "Export / Print did not finish. Check layout options, fonts, images or the output location.") + " " + String(describing: error))
+            if command["printing"] as? Bool == false { await notifications.send(success: false, name: metadata.title, english: settings.english) }
+        }
     }
     private func deliver(_ fields: [String: Any]) async throws -> Any {
         var payload = fields; payload["protocolVersion"] = 1; payload["sessionID"] = sessionID
@@ -572,7 +651,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: any Error) { fail("navigationFailure", error) }
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { fail("webProcessTerminated", nil) }
     private func fail(_ event: String, _ error: Error?) {
-        log(event, ["error": error.map(String.init(describing:)) ?? "operation failed"])
+        record(event, error, level: "critical")
         if event == "webProcessTerminated" || event == "hostDeliveryFailure" { webFailed = true }
         if ready && !webFailed { notice(settings.text("操作未完成，当前编辑请勿关闭：", "Operation incomplete. Keep your current document open: ") + (error.map(String.init(describing:)) ?? event)) }
         else if let window, window.attachedSheet == nil {
@@ -580,9 +659,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
             alert.beginSheetModal(for: window)
         }
     }
-    private func log(_ event: String, _ fields: [String: Any]) {
-        var object = fields; object["event"] = event
-        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else { return }
-        print(String(decoding: data, as: UTF8.self)); fflush(stdout)
+    private func record(_ event: String, _ error: Error? = nil, level: String = "error") {
+        let entry = DiagnosticEvent(event, level: level, error: error)
+        if runtime?.record(entry, version: resources.info.version, session: sessionID) != true,
+           let data = entry.data(version: resources.info.version, session: sessionID) { FileHandle.standardError.write(data) }
     }
 }

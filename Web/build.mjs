@@ -27,8 +27,9 @@ const diagrams = await build({ absWorkingDir: here, entryPoints: ['src/mermaid-r
 await writeFile(resolve(outdir, '../mermaid-bundle.json'), JSON.stringify(diagrams.metafile, null, 2) + '\n');
 const lock = JSON.parse(await readFile(resolve(here, 'package-lock.json'), 'utf8'));
 const bundledPackages = [...new Set([...Object.keys(result.metafile.inputs), ...Object.keys(diagrams.metafile.inputs)].flatMap(path => {
-  const match = path.match(/^node_modules\/(?:@[^/]+\/)?[^/]+/);
-  return match ? [match[0]] : [];
+  const parts = path.split('/'), index = parts.lastIndexOf('node_modules');
+  if (index < 0) return [];
+  return [parts.slice(parts.indexOf('node_modules'), index + (parts[index + 1].startsWith('@') ? 3 : 2)).join('/')];
 }))].sort();
 const dependencies = [], notices = ['Markfine — bundled dependency licenses and notices.\n'];
 for (const path of bundledPackages) {

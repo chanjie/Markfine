@@ -18,4 +18,5 @@ public final class RecentLocations {
         defaults.set(([canonical] + urls.filter { $0.path != canonical.path }).prefix(20).map(\.absoluteString), forKey: key)
     }
     public func clear() { defaults.removeObject(forKey: key) }
+    public var byteCount: Int { guard let values = defaults.stringArray(forKey: key), !values.isEmpty else { return 0 }; return (try? JSONSerialization.data(withJSONObject: values).count) ?? 0 }
 }

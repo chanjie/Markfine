@@ -8,23 +8,23 @@ export function stopScroll(element: HTMLElement): void {
   animations.delete(element);
 }
 export function scrollDuration(distance: number): number { return Math.min(700, Math.max(140, 140 + Math.sqrt(Math.max(0, distance)) * 10)); }
-export function animateScroll(element: HTMLElement, top: number, left = element.scrollLeft, duration?: number): void {
+export function animateScroll(element: HTMLElement, top: number, left = element.scrollLeft, duration?: number, complete?: () => void): void {
   stopScroll(element);
   top = Math.max(0, Math.min(element.scrollHeight - element.clientHeight, top));
   left = Math.max(0, Math.min(element.scrollWidth - element.clientWidth, left));
   duration ??= scrollDuration(Math.max(Math.abs(top - element.scrollTop), Math.abs(left - element.scrollLeft)));
-  if (matchMedia('(prefers-reduced-motion: reduce)').matches) { element.scrollTo(left, top); return; }
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) { element.scrollTo(left, top); complete?.(); return; }
   const fromTop = element.scrollTop, fromLeft = element.scrollLeft, start = performance.now();
   const running = { frame: 0, timer: 0, top, left }; animations.set(element, running);
   // A background/minimized WebView can suspend animation frames. Always commit the final destination.
   running.timer = window.setTimeout(() => {
     if (animations.get(element) !== running) return;
-    cancelAnimationFrame(running.frame); element.scrollTo(left, top); animations.delete(element);
+    cancelAnimationFrame(running.frame); element.scrollTo(left, top); animations.delete(element); complete?.();
   }, duration + 60);
   const advance = (now: number) => {
     const progress = Math.min(1, (now - start) / duration), eased = 1 - (1 - progress) ** 4;
     element.scrollTo(fromLeft + (left - fromLeft) * eased, fromTop + (top - fromTop) * eased);
-    if (progress < 1) running.frame = requestAnimationFrame(advance); else { clearTimeout(running.timer); animations.delete(element); }
+    if (progress < 1) running.frame = requestAnimationFrame(advance); else { clearTimeout(running.timer); animations.delete(element); complete?.(); }
   };
   running.frame = requestAnimationFrame(advance);
 }
@@ -35,7 +35,7 @@ export function centerCaret(view: EditorView): void {
 export function scrollToPosition(view: EditorView, position: number): void {
   const first = view.state.field(referenceIndex).tree.topNode.firstChild;
   if (first && position <= first.to) { if (view.scrollDOM.scrollTop > 0) animateScroll(view.scrollDOM, 0); return; }
-  const caret = tableCaretRect(view) ?? view.coordsAtPos(view.state.selection.main.head);
+  const caret = tableCaretRect(view) ?? view.coordsAtPos(position);
   const scroller = view.scrollDOM, viewport = scroller.getBoundingClientRect();
   const block = !caret ? view.lineBlockAt(position) : null;
   const target = caret ? (caret.top + caret.bottom) / 2 : view.documentTop + block!.top + block!.height / 2;

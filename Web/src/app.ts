@@ -1,17 +1,19 @@
+import './offline-policy';
 import { Compartment, EditorSelection, EditorState, Transaction, type TransactionSpec } from '@codemirror/state';
 import { EditorView, keymap } from '@codemirror/view';
-import { syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language';
+import { syntaxHighlighting, defaultHighlightStyle, syntaxTree } from '@codemirror/language';
 import { defaultKeymap, history, historyKeymap, isolateHistory, redo, undo } from '@codemirror/commands';
 import { editorMarkdown } from './editor-language';
 import { blockPreview, composition } from './preview';
 import { SaveMachine, protectClose, protectCloseAll, type Context } from './save-machine';
-import { formatTransaction, findMatch, replacementChanges } from './commands';
+import { formatTransaction, findMatch, replacementChanges, literalPattern } from './commands';
+import { deletionTransaction } from './deletion';
 import { imageMigrationChanges, migrateImageReferences, stagedReferences } from './migration';
 import { newID } from './protocol';
 import { documentOutline, type OutlineHeading } from './outline';
-import { defaultApplicationPreferences, normalizePreferences, preferencesEffect, sourceModeEffect } from './editor-preferences';
+import { bodyLineHeight, editingLineHeight, defaultApplicationPreferences, normalizePreferences, preferencesEffect, sourceModeEffect } from './editor-preferences';
 import { formatContext } from './format-context';
-import { tableComposing, tableHasFocus, focusTableSelection, navigateTable } from './table-editor';
+import { tableComposing, tableHasFocus, focusTableSelection, navigateTable, deleteTableCell } from './table-editor';
 import { renderBlock } from './renderer';
 import { t, setLanguage, localizePage, formatTimestamp } from './localization';
 import { safeLink } from './links';
@@ -22,16 +24,20 @@ import { renderEmptyState } from './empty-state';
 import { WorkspaceBrowser, type WorkspaceEntry } from './workspace-browser';
 import { DiagramViewer } from './diagram-viewer';
 import { replaceablePreview } from './preview-state';
+import { tabLabel, closeTargets, showTabMenu, installReadingTabs, pathTooltip, type TabCloseScope } from './tab-navigation';
+import { SearchHighlights } from './search-highlights';
+import { exportHTML } from './document-output';
 
 declare global {
   var __markfineBootstrap: Context;
-  var markfine: { receive(message: Record<string, unknown>): boolean; prepareSnapshot(source: string, mapping: Record<string, string>): string; stagedReferences(source: string): string[] };
+  var markfine: { receive(message: Record<string, unknown>): boolean; prepareSnapshot(source: string, mapping: Record<string, string>): string; stagedReferences(source: string): string[]; exportSnapshot(id: string): Promise<{ html: string; resources: string[] }> };
   var __markfineRenderDiagram: ((source: string, documentID: string) => Promise<SVGElement>) | undefined;
 }
 export interface EditorDocument {
   id: string; title: string; path: string; state: EditorState; saves: SaveMachine; locks: Compartment;
   imageLocked: boolean; closeLocked: boolean; numbers: Compartment; sourceStyles: Compartment; preview: boolean; unsupported: boolean; readerScroll?: number; savedAt?: number;
   scroll?: ReturnType<EditorView['scrollSnapshot']>; unsubscribe: () => void;
+  resume?: { mode: string; line: number; fraction: number }; resumeShown?: boolean;
 }
 interface PasteJob { id: string; documentID: string; revision: number; selection: EditorSelection; cancelRequested: boolean }
 const context = globalThis.__markfineBootstrap;
@@ -75,8 +81,16 @@ export class EditorApplication {
   private stalePreviewIDs = new Set<string>();
   private readonly diagramViewer = new DiagramViewer();
   private diagramTimers = new WeakMap<HTMLElement, number>();
+  private diagramPromises = new WeakMap<HTMLElement, Promise<void>>();
+  private positionJump = 0;
+  private resumeTimer = 0;
+  private findGeneration = 0;
+  private findOffset = 0;
+  private searchRoom = 0;
+  private readonly highlights = new SearchHighlights(() => byID(this.reading ? 'reader-content' : 'editor'));
+  private diagnostics = new Map<string, number>();
   private readonly workspaceBrowser = new WorkspaceBrowser((kind, fields) => this.post(kind, fields), (entry, generation, pin) => this.openWorkspaceFile(entry, generation, pin),
-    value => { this.applyPreferences({ showAllFiles: value }); this.persistPreference('showAllFiles', value); }, () => this.applyLayout());
+    value => { this.applyPreferences({ showAllFiles: value }); this.persistPreference('showAllFiles', value); }, () => { this.applyLayout(); this.renderChrome(); });
 
   constructor() {
     byID('toggle-outline').onclick = () => this.toggleOutline();
@@ -85,6 +99,11 @@ export class EditorApplication {
     byID('exit-reading').onclick = () => this.setReading(false);
     byID('toggle-source').onclick = () => this.toggleSource();
     byID('move-outline').onclick = () => { const side = this.preferences.outlineSide === 'left' ? 'right' : 'left'; this.applyPreferences({ outlineSide: side }); this.persistPreference('outlineSide', side); };
+    byID('move-files').onclick = () => { const side = this.preferences.filesSide === 'left' ? 'right' : 'left'; this.applyPreferences({ filesSide: side }); this.persistPreference('filesSide', side); };
+    installReadingTabs(byID('tab-strip'), byID('tabs-trigger'));
+    byID('tabs-trigger').ondblclick = () => this.post('zoomWindow');
+    byID('reading-header').ondblclick = event => { if (event.target instanceof Element && !event.target.closest('button')) this.post('zoomWindow'); };
+    byID('resume-position').onclick = () => this.resumePosition();
     byID('open-unsupported').onclick = () => { if (this.active?.unsupported) this.post('openUnsupported', { documentID: this.activeID }); };
     byID('zoom-button').onclick = () => { const menu = byID('zoom-menu'); menu.hidden = !menu.hidden; byID('zoom-button').setAttribute('aria-expanded', String(!menu.hidden)); };
     for (const percent of [50, 75, 90, 100, 110, 125, 150, 175, 200]) {
@@ -94,16 +113,19 @@ export class EditorApplication {
     document.addEventListener('pointerdown', event => { if (!(event.target instanceof Element && event.target.closest('.zoom-control'))) { byID('zoom-menu').hidden = true; byID('zoom-button').setAttribute('aria-expanded', 'false'); } });
     byID('document-title').onclick = () => this.setReading(false);
     installScrollIndicators();
-    installOutlineResize(byID('outline-resize'), (width, persist) => {
-      this.preferences.outlineWidth = Math.max(180, Math.min(360, width)); this.applyLayout();
-      if (persist) this.persistPreference('outlineWidth', this.preferences.outlineWidth);
-    });
+    const resize = (side: 'left' | 'right', width: number, persist: boolean) => {
+      const key = side === 'left' ? 'leftWidth' : 'rightWidth'; this.preferences[key] = Math.max(180, Math.min(360, width)); this.applyLayout();
+      if (persist) this.persistPreference(key, this.preferences[key]);
+    };
+    for (const side of ['left', 'right'] as const) installOutlineResize(byID(side + '-resize'), (width, persist) => resize(side, width, persist), () => side);
+    matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => this.applyLayout());
     new ResizeObserver(() => { this.applyLayout(); this.scheduleCenter(); }).observe(byID('main'));
     byID('main').addEventListener('wheel', event => {
       if (event.metaKey || event.ctrlKey) { event.preventDefault(); this.zoomBy(Math.exp(-event.deltaY * .003)); }
-      else for (const element of byID('main').querySelectorAll<HTMLElement>('.cm-scroller,.reader,pre,table,.diagram')) stopScroll(element);
+      else { this.positionJump++; this.findGeneration++; for (const element of byID('main').querySelectorAll<HTMLElement>('.cm-scroller,.reader,pre,table,.diagram')) stopScroll(element); }
     }, { passive: false });
-    byID('editor').addEventListener('pointerdown', () => { this.pointerSelecting = true; if (this.view) stopScroll(this.view.scrollDOM); });
+    byID('editor').addEventListener('pointerdown', () => { this.pointerSelecting = true; this.findGeneration++; if (this.view) stopScroll(this.view.scrollDOM); });
+    byID('reader').addEventListener('pointerdown', () => { this.positionJump++; this.findGeneration++; stopScroll(byID('reader')); });
     document.addEventListener('pointerup', () => { if (this.pointerSelecting) { this.pointerSelecting = false; this.scheduleCenter(); } });
     byID('editor').addEventListener('compositionend', () => queueMicrotask(() => this.scheduleCenter()));
     byID('editor').addEventListener('transitionend', event => { if (event.target instanceof Element && event.target.classList.contains('link-syntax')) this.scheduleCenter(); });
@@ -119,13 +141,14 @@ export class EditorApplication {
       else if (event.isTrusted) this.post('openLink', { documentID: this.activeID, href });
     }, true);
     byID('reader').addEventListener('scroll', () => this.updateReadingOutline());
-    byID('tab-strip').ondblclick = event => { if (event.target instanceof Element && !event.target.closest('button,.tab')) this.command('new'); };
+    byID('tab-strip').ondblclick = event => { if (event.target instanceof Element && !event.target.closest('button,.tab')) { if (this.reading) this.post('zoomWindow'); else this.command('new'); } };
     byID('editor').addEventListener('table-paste', () => this.requestPaste());
     byID('dismiss-notice').onclick = () => { this.notice = ''; this.renderChrome(); };
     byID('cancel-paste').onclick = () => this.cancelPaste();
     byID<HTMLInputElement>('query').oninput = () => this.find(false, true);
     byID('find-next').onclick = () => this.find(false); byID('find-previous').onclick = () => this.find(true);
     byID('replace-one').onclick = () => this.replace(false); byID('replace-all').onclick = () => this.replace(true);
+    byID('find-mode').onclick = () => this.setFindMode(byID('replace-row').hidden === true);
     byID('close-find').onclick = () => this.hideFind();
     byID('find-panel').addEventListener('keydown', event => {
       if (event.isComposing) return;
@@ -136,20 +159,26 @@ export class EditorApplication {
     });
     document.addEventListener('keydown', event => {
       if (event.defaultPrevented || event.isComposing || this.composing()) return;
+      if (event.key === 'Escape' && !byID('find-panel').hidden) { event.preventDefault(); this.hideFind(); return; }
       if (event.key === 'Escape' && !byID('zoom-menu').hidden) { byID('zoom-menu').hidden = true; byID('zoom-button').setAttribute('aria-expanded', 'false'); event.preventDefault(); return; }
       if (this.reading && !document.querySelector('dialog[open]') && !(event.target instanceof HTMLInputElement) && !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey) {
         if (event.key === 'Escape') { event.preventDefault(); this.setReading(false); return; }
-        if (scrollReading(byID('reader'), event.key)) { event.preventDefault(); return; }
+        if (scrollReading(byID('reader'), event.key)) { this.positionJump++; this.findGeneration++; event.preventDefault(); return; }
       }
       if (event.ctrlKey && !event.metaKey && event.key === 'Tab') { event.preventDefault(); this.switchTab(event.shiftKey ? -1 : 1); }
     });
-    window.addEventListener('error', event => this.errors.push(String(event.message)));
-    window.addEventListener('unhandledrejection', event => this.errors.push(String(event.reason)));
+    window.addEventListener('error', event => { this.errors.push(String(event.message)); this.diagnostic('globalError'); });
+    window.addEventListener('unhandledrejection', event => { this.errors.push(String(event.reason)); this.diagnostic('unhandledRejection'); });
+    window.addEventListener('markfine-offline-blocked', () => this.diagnostic('blockedNetwork'));
     renderEmptyState();
   }
   post(kind: string, fields: Record<string, unknown> = {}): void {
     const { protocolVersion, sessionID, capability } = context;
     transport({ protocolVersion, sessionID, capability, kind, ...fields });
+  }
+  private diagnostic(event: string): void {
+    const now = Date.now(); if (now - (this.diagnostics.get(event) ?? 0) < 5000) return;
+    this.diagnostics.set(event, now); this.post('diagnostic', { event });
   }
   get active(): EditorDocument | undefined { return this.documents.get(this.activeID); }
   composing(): boolean { return !!this.view && (this.view.composing || this.view.state.field(composition) || tableComposing(this.view)); }
@@ -172,6 +201,7 @@ export class EditorApplication {
         ...Object.entries({ 'Mod-b': 'bold', 'Mod-i': 'italic', 'Mod-k': 'link', 'Mod-Alt-k': 'inlineCode', 'Mod-Alt-c': 'codeBlock',
           'Mod-Alt-q': 'quote', 'Mod-Alt-o': 'ordered', 'Mod-Alt-u': 'unordered', 'Mod-Alt-x': 'task', 'Mod-Alt-t': 'table',
           'Ctrl-Shift-`': 'strike', 'Ctrl-Mod-i': 'image', 'Mod-]': 'indent', 'Mod-[': 'outdent',
+          'Mod-Shift-k': 'deleteLine', 'Mod-Alt-Shift-k': 'deleteParagraph',
           'Mod-0': 'heading0', 'Mod-1': 'heading1', 'Mod-2': 'heading2', 'Mod-3': 'heading3', 'Mod-4': 'heading4', 'Mod-5': 'heading5', 'Mod-6': 'heading6'
         }).map(([key, action]) => ({ key, run: () => this.command(action) })),
         ...historyKeymap, ...defaultKeymap
@@ -179,7 +209,7 @@ export class EditorApplication {
       blockPreview(id, element => this.hydrate(element, id)),
       documentOutline,
       EditorView.contentAttributes.of(() => ({ 'aria-label': t('Markdown 正文', 'Markdown document'), spellcheck: 'false', autocorrect: 'off', autocapitalize: 'off' })),
-      EditorView.exceptionSink.of(error => { this.errors.push(String(error)); this.setNotice(t('编辑器发生异常，请保留当前内容：', 'Editor error. Keep your current content: ') + String(error)); }),
+      EditorView.exceptionSink.of(error => { this.errors.push(String(error)); this.diagnostic('editorException'); this.setNotice(t('编辑器发生异常，请保留当前内容：', 'Editor error. Keep your current content: ') + String(error)); }),
       EditorView.domEventHandlers({ paste: (event, view) => {
         if (view.composing || view.state.field(composition)) return false;
         event.preventDefault(); this.requestPaste(); return true;
@@ -188,7 +218,11 @@ export class EditorApplication {
         const item = this.documents.get(id); if (!item) return;
         item.state = update.state;
         if (update.docChanged && this.collapsed.has(id)) this.collapsed.set(id, new Set([...this.collapsed.get(id)!].map(from => update.changes.mapPos(from))));
-        if (update.docChanged) { if (!item.unsupported) item.preview = false; item.saves.edited(update.state.doc); this.updateCount(); }
+        if (update.docChanged) {
+          this.findGeneration++; if (this.view) stopScroll(this.view.scrollDOM);
+          if (!byID('find-panel').hidden) this.highlights.set(byID<HTMLInputElement>('query').value);
+          if (!item.unsupported) item.preview = false; item.saves.edited(update.state.doc); this.updateCount();
+        }
         // A focus-only blur must not replace a TOC button between mousedown and click.
         if (update.docChanged || update.selectionSet) this.renderOutline();
         if (update.docChanged || update.selectionSet || update.focusChanged) this.scheduleHint();
@@ -199,7 +233,7 @@ export class EditorApplication {
     const saves = new SaveMachine(context, id, state.doc, transport);
     saves.lineSeparator = separator;
     const item: EditorDocument = { id, title: String(message.title), path: String(message.path), state, saves, locks,
-      imageLocked: false, closeLocked: false, numbers, sourceStyles, preview: message.preview === true, unsupported: message.unsupported === true, unsubscribe: () => {} };
+      imageLocked: false, closeLocked: false, numbers, sourceStyles, preview: message.preview === true, unsupported: message.unsupported === true, unsubscribe: () => {}, resume: message.resume as EditorDocument['resume'] };
     this.documents.set(id, item); item.unsubscribe = saves.subscribe(() => this.renderChrome());
     if (stale) { this.stalePreviewIDs.add(id); return; }
     if (!this.composing()) this.activate(id); else this.renderChrome();
@@ -210,6 +244,8 @@ export class EditorApplication {
     if (this.composing()) { this.setNotice(t('请先完成当前中文组词', 'Finish the current input composition first')); return false; }
     const next = this.documents.get(id); if (!next) return false;
     if (next.closeLocked) return false;
+    if (id === this.activeID) return true;
+    this.rememberPosition(); this.resetSearchRoom(); this.dismissResume(); this.findGeneration++; this.positionJump++;
     if (next.unsupported && this.reading) this.setReading(false);
     const previous = this.active;
     if (previous && this.view) { previous.state = this.view.state; previous.scroll = this.view.scrollSnapshot(); if (this.reading) previous.readerScroll = byID('reader').scrollTop; }
@@ -217,11 +253,23 @@ export class EditorApplication {
     if (this.view) this.view.setState(next.state);
     else this.view = new EditorView({ state: next.state, parent: byID('editor') });
     this.view.dispatch({ effects: [preferencesEffect.of(this.preferences), sourceModeEffect.of(this.sourceEditing), next.scroll ?? EditorView.scrollIntoView(next.state.selection.main.head, { y: 'nearest' })] });
+    if (!next.scroll && this.view.state.selection.main.head === 0) {
+      // A reused EditorView keeps its DOM scroller across setState. A newly opened document
+      // must not inherit another tab's offset, including a later layout/height correction.
+      const initialDoc = this.view.state.doc, jump = this.positionJump, find = this.findGeneration;
+      this.view.scrollDOM.scrollTop = 0; this.view.scrollDOM.scrollLeft = 0;
+      this.view.requestMeasure({ key: next, read: () => null, write: (_, view) => {
+        if (this.activeID === id && !this.reading && view.state.doc === initialDoc && view.state.selection.main.head === 0 &&
+            this.positionJump === jump && this.findGeneration === find && !this.pointerSelecting && !this.composing()) view.scrollDOM.scrollTop = 0;
+      } });
+    }
     this.applyLayout();
-    if (this.reading) { this.renderReading(); byID('reader').scrollTop = next.readerScroll ?? 0; byID('reader').focus({ preventScroll: true }); }
+    if (this.reading) { this.pin(next); this.renderReading(); byID('reader').scrollTop = next.readerScroll ?? 0; byID('reader').focus({ preventScroll: true }); }
     else if (next.unsupported) byID('unsupported').focus();
     else { this.view.focus(); this.scheduleCenter(); }
     this.notice = ''; this.renderChrome(); this.post('activeDocument', { documentID: id });
+    if (!byID('find-panel').hidden) this.highlights.set(byID<HTMLInputElement>('query').value);
+    this.offerResume(next);
     return true;
   }
   private switchTab(direction: number): void {
@@ -248,22 +296,27 @@ export class EditorApplication {
     if (action === 'toggleSource') { this.toggleSource(); return true; }
     if (action === 'toggleReading') { this.setReading(!this.reading); return true; }
     if (action === 'toggleLineNumbers') { this.applyPreferences({ lineNumbers: !this.preferences.lineNumbers }); this.persistPreference('lineNumbers', this.preferences.lineNumbers); return true; }
+    if (action === 'toggleFocus') { this.applyPreferences({ focusMode: !this.preferences.focusMode }); this.persistPreference('focusMode', this.preferences.focusMode); return true; }
     if (action === 'help') { showHelp(byID<HTMLDialogElement>('help-dialog')); return true; }
+    if (action === 'userGuide') { showHelp(byID<HTMLDialogElement>('help-dialog'), true); return true; }
     if (action === 'zoomIn' || action === 'zoomOut' || action === 'zoomReset') { this.zoomBy(action === 'zoomReset' ? 1 / this.zoom : action === 'zoomIn' ? 1.1 : 1 / 1.1); return true; }
     if (action === 'toggleOutline') { this.toggleOutline(); return true; }
     if (action === 'new' || action === 'open') {
       if (this.closing) return false; this.post(action); return true;
     }
     if (action === 'save') return this.saveActive();
+    if (action === 'export' || action === 'print') { if (!this.active || this.active.unsupported || this.closing || this.active.imageLocked) return false; this.post('exportDocument', { documentID: this.activeID, printing: action === 'print', mode: this.reading ? 'read' : this.sourceEditing ? 'source' : 'edit' }); return true; }
     if (action === 'close') {
       const dialog = document.querySelector<HTMLDialogElement>('dialog[open]');
       if (dialog) { if (dialog.dispatchEvent(new Event('cancel', { cancelable: true }))) dialog.close(); return true; }
       if (this.active) void this.closeTab(this.active.id); else if (!this.closing) this.post('closeEmptyWindow'); return true;
     }
     if (action === 'nextTab' || action === 'previousTab') { this.switchTab(action === 'nextTab' ? 1 : -1); return true; }
-    if (this.reading || this.active?.unsupported) return false;
+    if (this.active?.unsupported) return false;
+    if (action === 'replace' && this.reading) return false;
     if (action === 'find' || action === 'replace') { this.showFind(action === 'replace'); return true; }
     if (action === 'findNext' || action === 'findPrevious') { this.find(action === 'findPrevious'); return true; }
+    if (this.reading) return false;
     if (action === 'paste') { if (!this.view || !(this.view.hasFocus || tableHasFocus(this.view))) return false; this.requestPaste(); return true; }
     if (!this.view || !(this.view.hasFocus || tableHasFocus(this.view))) {
       if (['undo', 'redo'].includes(action) && document.activeElement instanceof HTMLInputElement) return document.execCommand(action);
@@ -272,6 +325,11 @@ export class EditorApplication {
     const item = this.active;
     if (!item || item.imageLocked || item.closeLocked) return false;
     if (action === 'undo' || action === 'redo') { const cell = tableHasFocus(this.view); const result = action === 'undo' ? undo(this.view) : redo(this.view); if (cell) focusTableSelection(this.view); return result; }
+    if (action === 'deleteLine' || action === 'deleteParagraph') {
+      if (tableHasFocus(this.view)) return deleteTableCell(this.view);
+      const spec = deletionTransaction(this.view.state, action); if (!spec) return false;
+      this.view.dispatch({ ...spec, annotations: isolateHistory.of('full') }); return true;
+    }
     const transaction = formatTransaction(this.view.state, action);
     if (!transaction) return false;
     const cell = tableHasFocus(this.view);
@@ -280,18 +338,29 @@ export class EditorApplication {
 
   showFind(replace: boolean): void {
     if (!this.active || this.composing()) return;
-    byID('find-panel').hidden = false; byID('replace-row').hidden = !replace;
+    byID('find-panel').hidden = false; document.body.classList.add('finding'); this.applyLayout(); this.setFindMode(replace);
     const selected = this.active.state.sliceDoc(this.active.state.selection.main.from, this.active.state.selection.main.to);
     if (selected && !selected.includes('\n')) byID<HTMLInputElement>('query').value = selected;
     byID<HTMLInputElement>('query').focus(); byID<HTMLInputElement>('query').select();
     this.updateFindCount();
+    this.highlights.set(byID<HTMLInputElement>('query').value);
   }
-  hideFind(): void { if (this.composing()) return; byID('find-panel').hidden = true; if (!this.reading) { this.view?.focus(); this.scheduleCenter(); } }
+  private setFindMode(replace: boolean): void {
+    replace &&= !this.reading; byID('replace-row').hidden = !replace;
+    byID('find-mode').textContent = (replace ? t('替换', 'Replace') : t('查找', 'Find')) + ' ⇄';
+    byID('find-mode').setAttribute('aria-expanded', String(replace)); byID<HTMLButtonElement>('find-mode').disabled = this.reading;
+  }
+  hideFind(): void { if (this.composing()) return; this.resetSearchRoom(); byID('find-panel').hidden = true; document.body.classList.remove('finding'); this.findGeneration++; this.highlights.clear(); if (!this.reading) this.view?.focus(); else byID('reader').focus({ preventScroll: true }); }
   find(backwards: boolean, fromStart = false): boolean {
     const item = this.active; if (!item || this.composing()) return false;
     const query = byID<HTMLInputElement>('query').value;
-    const match = findMatch(item.state.doc.toString(), query, fromStart ? 0 : backwards ? item.state.selection.main.from : item.state.selection.main.to, backwards);
-    if (match) this.edit(item.id, { selection: EditorSelection.single(match.from, match.to), scrollIntoView: true });
+    const match = findMatch(item.state.doc.toString(), query, fromStart ? 0 : this.reading ? this.findOffset : backwards ? item.state.selection.main.from : item.state.selection.main.to, backwards);
+    this.highlights.set(query); const generation = ++this.findGeneration;
+    if (match) {
+      this.findOffset = backwards ? match.from : match.to;
+      if (!this.reading) this.edit(item.id, { selection: EditorSelection.single(match.from, match.to) });
+      this.centerMatch(match.from, () => { if (generation === this.findGeneration) { const block = this.matchBlock(match.from); this.highlights.flash(block,block ? this.matchRect(block,match.from) : undefined); } });
+    }
     this.updateFindCount(); return !!match;
   }
   replace(all: boolean): boolean {
@@ -316,6 +385,63 @@ export class EditorApplication {
     if (byID('find-panel').hidden) return;
     const query = byID<HTMLInputElement>('query').value;
     byID('matches').textContent = query && this.active ? `${replacementChanges(this.active.state.doc.toString(), query, '').length} ${t('处匹配', 'matches')}` : t('输入查找内容', 'Enter search text');
+    this.highlights.schedule();
+  }
+
+  private readerBlock(position: number): HTMLElement | undefined {
+    if (!this.active) return;
+    const line = this.active.state.doc.lineAt(position).number - 1;
+    let target: HTMLElement | undefined;
+    for (const block of byID('reader-content').querySelectorAll<HTMLElement>(':scope > [data-source-line]')) { if (Number(block.dataset.sourceLine) > line) continue; if (!target || Number(block.dataset.sourceLine) >= Number(target.dataset.sourceLine)) target = block; }
+    return target;
+  }
+  private matchBlock(position: number): HTMLElement | undefined {
+    if (this.reading) {
+      const line = this.active!.state.doc.lineAt(position).number - 1;
+      return [...byID('reader-content').querySelectorAll<HTMLElement>('[data-source-line]')].filter(node => Number(node.dataset.sourceLine) <= line).sort((a,b) => Number(b.dataset.sourceLine) - Number(a.dataset.sourceLine) || (a.contains(b) ? 1 : -1))[0];
+    }
+    if (!this.view) return;
+    let node = syntaxTree(this.view.state).resolveInner(position);
+    while (node.parent && node.name !== 'Table') node = node.parent;
+    if (node.name === 'Table') {
+      const first = this.view.state.doc.lineAt(node.from).number, row = this.view.state.doc.lineAt(position).number - first;
+      return [...byID('editor').querySelectorAll<HTMLElement>(`.live-table[data-line="${first}"] tr`)][Math.max(0,row - 1)];
+    }
+    try { const at = this.view.domAtPos(position); return (at.node.nodeType === Node.ELEMENT_NODE ? at.node as Element : at.node.parentElement)?.closest<HTMLElement>('.cm-line,.live-table,.markdown-block') ?? undefined; } catch { return; }
+  }
+  private centerMatch(position: number, complete: () => void): void {
+    if (this.reading) {
+      const block = this.matchBlock(position), reader = byID('reader'); if (!block) return;
+      const target = () => { const rect = this.matchRect(block,position) ?? block.getBoundingClientRect(); return reader.scrollTop + (rect.top+rect.bottom)/2 - reader.getBoundingClientRect().top - reader.clientHeight/2; };
+      this.ensureSearchRoom(target()); animateScroll(reader, target(), undefined, undefined, complete);
+    } else if (this.view) {
+      const view = this.view, scroller = view.scrollDOM, id = this.activeID, generation = this.findGeneration;
+      const target = () => { if (generation !== this.findGeneration || position > view.state.doc.length) return scroller.scrollTop; const row = this.matchBlock(position), caret = row?.tagName === 'TR' ? row.getBoundingClientRect() : view.coordsAtPos(position), block = view.lineBlockAt(position); return caret ? scroller.scrollTop + (caret.top + caret.bottom) / 2 - scroller.getBoundingClientRect().top - scroller.clientHeight / 2 : view.documentTop + block.top + block.height / 2 - scroller.getBoundingClientRect().top + scroller.scrollTop - scroller.clientHeight / 2; };
+      this.ensureSearchRoom(target()); animateScroll(scroller, target(), undefined, undefined, () => {
+        if (this.activeID !== id || this.reading || generation !== this.findGeneration) return;
+        let finished = false; const finish = (top: number) => { if (finished || this.activeID !== id || this.reading || generation !== this.findGeneration) return; finished = true; animateScroll(scroller, top, undefined, 140, complete); };
+        view.requestMeasure({ read: target, write: finish }); window.setTimeout(() => { if (!finished) finish(target()); }, 80);
+      });
+    }
+  }
+  private matchRect(block: HTMLElement, position: number): DOMRect | undefined {
+    const query = byID<HTMLInputElement>('query').value; if (!this.active || !query) return;
+    const line = this.reading ? Number(block.dataset.sourceLine ?? 0) + 1 : this.active.state.doc.lineAt(position).number;
+    const from = this.active.state.doc.line(Math.max(1,Math.min(line,this.active.state.doc.lines))).from;
+    const ordinal = [...this.active.state.doc.sliceString(from,position).matchAll(literalPattern(query))].length;
+    return this.highlights.matchRect(block,ordinal);
+  }
+  private ensureSearchRoom(top: number): void {
+    if (top >= 0 || byID('find-panel').hidden) return;
+    this.searchRoom += -top; document.documentElement.style.setProperty('--search-top-room',this.searchRoom+'px'); byID('main').getBoundingClientRect(); this.view?.requestMeasure();
+  }
+  private resetSearchRoom(): void {
+    if (!this.searchRoom) return;
+    const scroller = this.reading ? byID('reader') : this.view?.scrollDOM, anchor = this.reading ? byID('reader-content').firstElementChild : this.view?.contentDOM.firstElementChild;
+    const before = anchor?.getBoundingClientRect().top;
+    this.searchRoom=0; document.documentElement.style.setProperty('--search-top-room','0px');
+    if (scroller && anchor && before !== undefined) scroller.scrollTop += anchor.getBoundingClientRect().top-before;
+    this.view?.requestMeasure();
   }
 
   requestPaste(): boolean {
@@ -363,6 +489,7 @@ export class EditorApplication {
     if (!item || this.closing || item.imageLocked || this.composing()) return false;
     this.closing = true;
     try {
+      if (id === this.activeID) this.rememberPosition();
       if (!await protectClose(item.saves, () => this.chooseClose(item))) { this.setNotice(t('关闭已取消或保存未完成，编辑内容已保留', 'Close cancelled or save incomplete. Your edits are retained')); return false; }
       item.closeLocked = true; this.lock(item);
       const result = await this.request('closeDocument', { documentID: id, revision: item.saves.revision });
@@ -374,11 +501,13 @@ export class EditorApplication {
     this.stalePreviewIDs.delete(item.id);
     item.unsubscribe(); item.saves.dispose(); this.documents.delete(item.id);
     if (this.activeID === item.id) {
+      this.dismissResume();
       this.activeID = ''; const next = this.documents.keys().next().value;
-      if (next) this.activate(next); else { this.view?.destroy(); this.view = null; byID('editor').replaceChildren(); if (this.reading) this.setReading(false); }
+      if (next) this.activate(next); else { this.hideFind(); this.view?.destroy(); this.view = null; byID('editor').replaceChildren(); if (this.reading) this.setReading(false); }
     }
   }
   private async closeAll(requestID: string): Promise<void> {
+    this.rememberPosition();
     let permitted = false;
     if (!this.closing && !this.pasteJob && !this.composing()) {
       this.closing = true;
@@ -404,7 +533,7 @@ export class EditorApplication {
     for (const image of element.querySelectorAll<HTMLImageElement>('img')) {
       // Reading is a complete local render; do not leave document images waiting on editor viewport activity.
       image.loading = this.reading ? 'eager' : 'lazy';
-      image.onerror = () => { image.classList.add('image-error'); image.title = t('本地图片不可用或超出文档权限', 'Local image is unavailable or outside document permissions'); };
+      image.onerror = () => { this.diagnostic('imageFailure'); image.classList.add('image-error'); image.title = t('本地图片不可用或超出文档权限', 'Local image is unavailable or outside document permissions'); };
       const size = () => {
         if (image.naturalWidth > 0) { image.style.setProperty('--image-width', image.naturalWidth + 'px'); image.style.width = 'calc(var(--image-width) * var(--content-zoom))'; }
         this.view?.requestMeasure();
@@ -414,7 +543,7 @@ export class EditorApplication {
     for (const diagram of element.querySelectorAll<HTMLElement>('[data-diagram]')) {
       const source = diagram.dataset.diagram!, token = newID(); diagram.dataset.renderToken = token;
       const retained = !!diagram.querySelector('svg'); clearTimeout(this.diagramTimers.get(diagram));
-      const render = () => void this.ensureMermaid().then(async () => {
+      const render = () => { const promise = this.ensureMermaid().then(async () => {
         if (!diagram.isConnected) return;
         const svg = await globalThis.__markfineRenderDiagram!(source, documentID);
         const width = Number(svg.getAttribute('viewBox')?.split(/[ ,]+/)[2]);
@@ -426,10 +555,11 @@ export class EditorApplication {
           const canvas = document.createElement('div'); canvas.className = 'diagram-inline'; canvas.append(svg); diagram.replaceChildren(tools, canvas); this.view?.requestMeasure();
         }
       }).catch(error => {
+        this.diagnostic('diagramFailure');
         if (!diagram.isConnected || diagram.dataset.renderToken !== token) return;
         const hint = diagram.querySelector('small') ?? document.createElement('small');
         hint.textContent = t('图表保留源码：', 'Diagram source retained: ') + String(error); if (!hint.isConnected) diagram.append(hint);
-      });
+      }); this.diagramPromises.set(diagram, promise); return promise; };
       if (retained) this.diagramTimers.set(diagram, window.setTimeout(render, 160)); else render();
     }
   }
@@ -440,7 +570,7 @@ export class EditorApplication {
     this.updateFindCount();
   }
   private toggleOutline(): void {
-    if (this.reading) return;
+    if (this.reading || !this.active || this.active.unsupported) return;
     this.outlineHidden = !this.outlineHidden;
     clearTimeout(this.outlineTimer);
     if (this.outlineHidden) {
@@ -489,6 +619,7 @@ export class EditorApplication {
         link.onmousedown = event => { if (event.button === 0) event.preventDefault(); };
         link.onclick = () => {
           if (this.composing() || !this.view) return;
+          this.positionJump++; this.findGeneration++;
           if (this.reading) {
             const line = item.state.doc.lineAt(heading.from).number - 1;
             const target = byID('reader-content').querySelector<HTMLElement>(`h${heading.level}[data-source-line="${line}"]`);
@@ -502,17 +633,16 @@ export class EditorApplication {
     append(headings, tree, 0);
   }
   renderChrome(): void {
+    document.getElementById('path-tooltip')?.remove();
     const tabs = byID('tabs'); tabs.replaceChildren();
     for (const item of this.documents.values()) {
       if (this.stalePreviewIDs.has(item.id)) continue;
       const row = document.createElement('div'); row.className = 'tab' + (item.id === this.activeID ? ' active' : '') + (item.preview || item.unsupported ? ' preview-tab' : ''); row.setAttribute('role', 'presentation');
       const select = document.createElement('button'); select.type = 'button'; select.setAttribute('role', 'tab'); select.setAttribute('aria-selected', String(item.id === this.activeID));
-      select.title = item.path || t('尚未保存', 'Not yet saved');
+      pathTooltip(select, item.path);
       if (item.saves.dirty) { const dot = document.createElement('span'); dot.className = 'dirty'; dot.setAttribute('aria-label', t('未保存', 'Unsaved')); select.append(dot); }
-      select.append(document.createTextNode(this.displayTitle(item)));
-      if ([...this.documents.values()].filter(other => other.title === item.title).length > 1) {
-        const suffix = document.createElement('small'); suffix.textContent = item.path ? item.path.split('/').at(-2) ?? '' : item.id.slice(0, 4); select.append(suffix);
-      }
+      select.append(document.createTextNode(tabLabel(item, [...this.documents.values()].filter(other => !this.stalePreviewIDs.has(other.id)))));
+      row.oncontextmenu = event => { if (!this.composing() && !this.closing) showTabMenu(event, [...this.documents.keys()].filter(id => !this.stalePreviewIDs.has(id)), item.id, scope => void this.closeTabs(item.id, scope)); };
       select.onclick = () => this.activate(item.id);
       select.ondblclick = () => this.pin(item);
       const close = document.createElement('button'); close.type = 'button'; close.className = 'close-tab'; close.textContent = '×'; close.setAttribute('aria-label', `${t('关闭', 'Close')} ${this.displayTitle(item)}`);
@@ -520,6 +650,10 @@ export class EditorApplication {
       row.append(select, close); tabs.append(row);
     }
     const item = this.active;
+    document.body.classList.toggle('no-document', !item || item.unsupported);
+    byID('outline-panel').hidden = !item || item.unsupported;
+    byID('toggle-outline').hidden = !item || item.unsupported;
+    byID('recent-panel').hidden = !!item || !!this.workspaceBrowser.root;
     byID('empty').hidden = !!item;
     if (!item && !this.wasEmpty) renderEmptyState(true); this.wasEmpty = !item;
     byID<HTMLButtonElement>('toggle-reading').disabled = !item || item.unsupported;
@@ -540,6 +674,8 @@ export class EditorApplication {
   receive(message: Record<string, unknown>): boolean {
     if (message.protocolVersion !== 1 || message.sessionID !== context.sessionID) return false;
     const kind = message.kind;
+    if (kind === 'recentLocations') { this.renderRecent((message.items ?? []) as { id: string; name: string; path: string }[]); return true; }
+    if (kind === 'clearPositions') { for (const item of this.documents.values()) item.resume = undefined; this.dismissResume(); return true; }
     if (this.workspaceBrowser.receive(message)) { if (kind === 'workspace') { this.latestOpenRequest = ''; this.openRequests.clear(); this.cleanupStalePreviews(''); } return true; }
     if (kind === 'openFailed') { if (message.openRequestID === this.latestOpenRequest) this.finishWorkspaceOpen(String(message.openRequestID), ''); return true; }
     if (kind === 'initialize' && !this.initialized) {
@@ -595,7 +731,8 @@ export class EditorApplication {
     let fonts = document.getElementById('user-fonts'); if (!fonts) { fonts = document.createElement('style'); fonts.id = 'user-fonts'; document.head.append(fonts); }
     const rules = `@font-face{font-family:"Markfine Latin";src:local(${JSON.stringify(this.preferences.fontEnglish)});unicode-range:U+0000-024F,U+1E00-1EFF}@font-face{font-family:"Markfine CJK";src:local(${JSON.stringify(this.preferences.fontChinese)});unicode-range:U+0250-1DFF,U+2000-10FFFF}`;
     if (fonts.textContent !== rules) fonts.textContent = rules;
-    this.workspaceBrowser.setPreferences(this.preferences.showAllFiles); this.moveOutline(this.preferences.outlineSide, before.outlineSide !== this.preferences.outlineSide);
+    this.workspaceBrowser.setPreferences(this.preferences.showAllFiles, this.preferences.timeZone); this.moveOutline(this.preferences.outlineSide, before.outlineSide !== this.preferences.outlineSide);
+    this.moveNavigation(byID('files-panel'), this.preferences.filesSide, before.filesSide !== this.preferences.filesSide);
     this.applyLayout(); this.renderChrome(); if (this.reading) this.renderReading(); else this.scheduleCenter();
   }
   private displayTitle(item: EditorDocument): string { return item.path ? item.title : t('未命名', 'Untitled'); }
@@ -614,12 +751,18 @@ export class EditorApplication {
   }
   private applyLayout(): void {
     const root = document.documentElement;
-    root.style.setProperty('--outline-width', `${this.preferences.outlineWidth}px`);
+    for (const side of ['left', 'right'] as const) {
+      const width = this.preferences[side === 'left' ? 'leftWidth' : 'rightWidth'];
+      byID(side + '-navigation').style.setProperty('--outline-width', `${width}px`); byID(side + '-resize').setAttribute('aria-valuenow', String(width));
+    }
+    root.style.setProperty('--outline-width', `${this.preferences[this.preferences.outlineSide === 'left' ? 'leftWidth' : 'rightWidth']}px`);
     root.style.setProperty('--content-zoom', String(this.zoom)); root.style.setProperty('--editor-height', `${byID('main').clientHeight}px`);
+    root.style.setProperty('--line-spacing', String(this.preferences[this.reading ? 'readLineSpacing' : 'editLineSpacing']));
+    root.style.setProperty('--body-line-height', String((this.reading || this.sourceEditing ? bodyLineHeight : editingLineHeight) * this.preferences[this.reading ? 'readLineSpacing' : 'editLineSpacing']));
+    root.dataset.appearance = this.preferences.appearance === 'system' ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light') : this.preferences.appearance;
     root.dataset.theme = this.preferences[this.reading ? 'readTheme' : 'editTheme'];
     root.dataset.outlineSide = this.preferences.outlineSide;
     document.body.classList.toggle('line-numbers-on', this.preferences.lineNumbers); document.body.classList.toggle('source-mode', this.sourceEditing);
-    byID('outline-resize').setAttribute('aria-valuenow', String(this.preferences.outlineWidth));
     byID('reader').classList.toggle('reader-line-numbers', this.preferences.lineNumbers); this.view?.requestMeasure();
   }
   private scheduleCenter(): void {
@@ -628,6 +771,7 @@ export class EditorApplication {
   }
   setReading(enabled: boolean): void {
     if (enabled === this.reading || this.composing() || enabled && (!this.active || this.active.unsupported || this.pasteJob)) return;
+    this.rememberPosition(); this.resetSearchRoom(); this.positionJump++; this.findGeneration++; this.highlights.clear();
     if (enabled) {
       this.pin(this.active!);
       this.outlineBeforeReading = this.outlineHidden;
@@ -635,9 +779,11 @@ export class EditorApplication {
       this.readingPosition = this.active!.state.selection.main.head;
       if (this.view) { this.active!.scroll = this.view.scrollSnapshot(); stopScroll(this.view.scrollDOM); }
       byID('find-panel').hidden = true;
+      document.body.classList.remove('finding');
       if (document.activeElement instanceof HTMLElement) document.activeElement.blur(); getSelection()?.removeAllRanges();
     } else if (this.active) this.active.readerScroll = byID('reader').scrollTop;
     this.reading = enabled;
+    if (!byID('find-panel').hidden) { this.setFindMode(false); this.highlights.set(byID<HTMLInputElement>('query').value); }
     for (const item of this.documents.values()) this.lock(item);
     document.body.classList.toggle('reading', enabled); byID('reading-header').hidden = !enabled;
     byID('editor').hidden = enabled; byID('reader').hidden = !enabled;
@@ -663,13 +809,14 @@ export class EditorApplication {
     this.hydrate(content, item.id);
   }
   private scrollReaderTo(element: HTMLElement): void {
+    this.positionJump++; this.findGeneration++;
     const reader = byID('reader'); animateScroll(reader, reader.scrollTop + element.getBoundingClientRect().top - reader.getBoundingClientRect().top - 40);
   }
   private updateReadingOutline(): void {
     if (!this.reading || !this.active) return;
     const reader = byID('reader'), boundary = reader.getBoundingClientRect().top + reader.clientHeight * .25;
     let line = 1;
-    for (const heading of byID('reader-content').querySelectorAll<HTMLElement>('h1,h2,h3,h4,h5,h6')) { if (heading.getBoundingClientRect().top > boundary) break; line = Number(heading.dataset.sourceLine) + 1; }
+    for (const heading of byID('reader-content').querySelectorAll<HTMLElement>('[data-source-line]')) { if (heading.getBoundingClientRect().top > boundary) continue; line = Math.max(line, Number(heading.dataset.sourceLine) + 1); }
     const position = this.active.state.doc.line(Math.max(1, Math.min(line, this.active.state.doc.lines))).from;
     if (position !== this.readingPosition) { this.readingPosition = position; this.renderOutline(); }
   }
@@ -709,7 +856,10 @@ export class EditorApplication {
     this.applyLayout(); this.renderChrome(); this.view?.focus();
   }
   private moveOutline(side: 'left' | 'right', animate: boolean): void {
-    const panel = byID('outline-panel'), target = byID(side === 'left' ? 'left-navigation' : 'right-navigation'); if (panel.parentElement === target) return;
+    this.moveNavigation(byID('outline-panel'), side, animate);
+  }
+  private moveNavigation(panel: HTMLElement, side: 'left' | 'right', animate: boolean): void {
+    const target = byID(side === 'left' ? 'left-navigation' : 'right-navigation'); if (panel.parentElement === target) return;
     const before = panel.getBoundingClientRect(); target.append(panel); document.documentElement.dataset.outlineSide = side;
     const after = panel.getBoundingClientRect();
     if (animate && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
@@ -717,7 +867,53 @@ export class EditorApplication {
       window.setTimeout(() => motion.finish(), 430);
     }
   }
+
+  private async closeTabs(id: string, scope: TabCloseScope): Promise<void> {
+    for (const target of closeTargets([...this.documents.keys()].filter(id => !this.stalePreviewIDs.has(id)), id, scope)) if (!await this.closeTab(target)) break;
+  }
+  private rememberPosition(): void {
+    const item = this.active; if (!item || item.unsupported) return;
+    let line = item.state.doc.lineAt(item.state.selection.main.head).number, fraction = 0;
+    if (this.reading) {
+      const boundary = byID('reader').getBoundingClientRect().top;
+      const blocks = [...byID('reader-content').querySelectorAll<HTMLElement>(':scope > [data-source-line]')];
+      const block = blocks.find(block => block.getBoundingClientRect().bottom > boundary + 1);
+      if (block) { line = Number(block.dataset.sourceLine) + 1; const rect = block.getBoundingClientRect(); fraction = Math.max(0, Math.min(1, (boundary - rect.top) / Math.max(1, rect.height))); }
+    }
+    this.post('rememberPosition', { documentID: item.id, mode: this.reading ? 'read' : 'edit', line, fraction });
+  }
+  private dismissResume(): void { clearTimeout(this.resumeTimer); byID('resume-position').hidden = true; }
+  private offerResume(item: EditorDocument): void {
+    if (!item.resume || item.resumeShown || item.unsupported) return;
+    item.resumeShown = true;
+    byID('resume-position').textContent = item.resume.mode === 'read' ? t('继续上次阅读 →', 'Resume reading →') : t(`返回上次编辑的第 ${item.resume.line} 行 →`, `Return to line ${item.resume.line} →`);
+    byID('resume-position').hidden = false; this.resumeTimer = window.setTimeout(() => this.dismissResume(), 5000);
+  }
+  private async resumePosition(): Promise<void> {
+    const item = this.active, saved = item?.resume; if (!item || !saved || this.composing()) return;
+    this.dismissResume(); const line = item.state.doc.line(Math.max(1, Math.min(saved.line, item.state.doc.lines)));
+    if (saved.mode === 'read') {
+      this.setReading(true); const jump = ++this.positionJump, id = item.id;
+      const content = byID('reader-content'); let timer = 0;
+      const resources = Promise.all([document.fonts.ready, ...[...content.querySelectorAll('img')].map(image => image.decode().catch(() => {})), ...[...content.querySelectorAll<HTMLElement>('[data-diagram]')].map(diagram => this.diagramPromises.get(diagram))]);
+      const ready = await Promise.race([resources.then(() => true), new Promise<boolean>(resolve => { timer = window.setTimeout(() => resolve(false), 3000); })]); clearTimeout(timer);
+      if (this.activeID !== id || !this.reading || jump !== this.positionJump) return;
+      if (!ready) { this.setNotice(t('内容仍在加载，未执行位置跳转。', 'Content is still loading. The position jump was not performed.')); return; }
+      const block = this.readerBlock(line.from), reader = byID('reader');
+      if (block) animateScroll(reader, reader.scrollTop + block.getBoundingClientRect().top - reader.getBoundingClientRect().top + block.offsetHeight * saved.fraction);
+    } else {
+      this.setReading(false); this.edit(item.id, { selection: EditorSelection.cursor(line.from) }); this.view?.focus(); this.centerMatch(line.from, () => {});
+    }
+  }
+  private renderRecent(items: { id: string; name: string; path: string }[]): void {
+    byID('recent-list').replaceChildren(); byID('recent-empty').hidden = items.length > 0;
+    for (const item of items) { const button = document.createElement('button'); button.className = 'recent-item'; button.title = item.path; const name = document.createElement('span'), path = document.createElement('small'); name.textContent = item.name; path.textContent = item.path; button.append(name, path); button.onclick = () => this.post('openRecent', { entryID: item.id }); byID('recent-list').append(button); }
+  }
+  async exportSnapshot(id: string): Promise<{ html: string; resources: string[] }> {
+    const item = this.documents.get(id); if (!item || item.unsupported || item.imageLocked || this.composing()) throw new Error(t('当前文档暂时无法导出', 'The document cannot be exported right now'));
+    return exportHTML(item.state.doc.toString(), id, () => this.ensureMermaid());
+  }
 }
 const application = new EditorApplication();
-globalThis.markfine = { receive: message => application.receive(message), prepareSnapshot: migrateImageReferences, stagedReferences };
+globalThis.markfine = { receive: message => application.receive(message), prepareSnapshot: migrateImageReferences, stagedReferences, exportSnapshot: id => application.exportSnapshot(id) };
 application.post('ready');

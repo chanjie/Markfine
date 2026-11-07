@@ -7,9 +7,10 @@ final class EditorScheme: NSObject, WKURLSchemeHandler {
     static let page = URL(string: "markfine://app/index.html")!
     private let resources: EditorResources
     private let images: ImageStore
+    private let diagnostic: ((Error) -> Void)?
     private var requests: [ObjectIdentifier: Task<Void, Never>] = [:]
 
-    init(resources: EditorResources, images: ImageStore) { self.resources = resources; self.images = images }
+    init(resources: EditorResources, images: ImageStore, diagnostic: ((Error) -> Void)? = nil) { self.resources = resources; self.images = images; self.diagnostic = diagnostic }
 
     func webView(_ webView: WKWebView, start urlSchemeTask: any WKURLSchemeTask) {
         let key = ObjectIdentifier(urlSchemeTask)
@@ -34,7 +35,7 @@ final class EditorScheme: NSObject, WKURLSchemeHandler {
             urlSchemeTask.didReceive(URLResponse(url: url, mimeType: mime, expectedContentLength: data.count, textEncodingName: "utf-8"))
             urlSchemeTask.didReceive(data)
             urlSchemeTask.didFinish()
-        } catch { if !Task.isCancelled, requests[key] != nil { urlSchemeTask.didFailWithError(error) } }
+        } catch { if !Task.isCancelled, requests[key] != nil { diagnostic?(error); urlSchemeTask.didFailWithError(error) } }
         requests[key] = nil
         }
     }

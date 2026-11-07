@@ -38,6 +38,7 @@ public struct EditorResources {
     }
 
     public init(root: URL) throws {
+        guard root.isFileURL, root.host == nil || root.host == "" || root.host == "localhost" else { throw ResourceFailure.invalid("local resource root required") }
         self.root = root
         let manifestURL = root.appendingPathComponent("manifest.json")
         let manifest = try JSONDecoder().decode(Manifest.self, from: Self.readRegular(manifestURL))
@@ -79,6 +80,7 @@ public struct EditorResources {
     }
 
     private static func readRegular(_ url: URL) throws -> Data {
+        guard url.isFileURL, url.host == nil || url.host == "" || url.host == "localhost" else { throw ResourceFailure.invalid("local resource URL required") }
         let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
         guard values.isRegularFile == true, values.isSymbolicLink != true, (values.fileSize ?? Int.max) <= 32 * 1_048_576 else {
             throw ResourceFailure.invalid(url.lastPathComponent)

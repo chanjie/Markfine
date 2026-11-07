@@ -1,3 +1,4 @@
+import './offline-policy';
 import mermaid from 'mermaid';
 import { validateDiagram } from './diagrams';
 import { localImageURL } from './renderer';

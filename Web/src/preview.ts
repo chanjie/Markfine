@@ -104,7 +104,7 @@ function decorations(state: EditorState, documentID: string, hydrate: (element: 
   const result: ReturnType<Decoration['range']>[] = raw ? [] : inlineDecorations(state, index.tree, range.from, range.to, index.context);
   const position = state.selection.main.head;
   let active = index.tree.resolveInner(position, -1);
-  while (active.parent && !/^(Paragraph|Task|ATXHeading[1-6]|SetextHeading[12]|Table|FencedCode|CodeBlock|HTMLBlock)$/.test(active.name)) active = active.parent;
+  while (active.parent && !/^(Paragraph|Task|ATXHeading[1-6]|SetextHeading[12]|Table|FencedCode|CodeBlock|HTMLBlock|CommentBlock)$/.test(active.name)) active = active.parent;
   const focus = state.field(editorPreferences).focusMode;
   const muted = (from: number, to: number) => focus && (active.name === 'Document' ? !(position >= from && position <= to) : (to < active.from || from > active.to));
   const lines = new Map<number, Set<string>>();
@@ -120,6 +120,8 @@ function decorations(state: EditorState, documentID: string, hydrate: (element: 
   const mark = (from: number, to: number, className: string) => { if (to > from) result.push(Decoration.mark({ class: className }).range(from, to)); };
   index.tree.iterate({ from: range.from, to: range.to, enter(ref) {
     const node = ref.node, name = node.name;
+    if (name === 'CommentBlock') { lineClass(node.from, node.to, 'markdown-comment'); return false; }
+    if (name === 'Comment') { mark(node.from, node.to, 'markdown-comment'); return false; }
     if (raw && name !== 'FencedCode' && name !== 'CodeBlock') return;
     if (name === 'Table') {
       result.push(Decoration.replace({ widget: new TableWidget(state.sliceDoc(node.from, node.to), node.from, muted(node.from, node.to)), block: true }).range(node.from, node.to)); return false;

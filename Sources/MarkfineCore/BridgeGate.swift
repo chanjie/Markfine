@@ -25,9 +25,14 @@ public struct BridgeGate {
         let common: Set<String> = ["protocolVersion", "sessionID", "capability", "kind"]
         let fields: Set<String>
         switch kind {
-        case "ready", "new", "open", "loadMermaid", "closeEmptyWindow": fields = []
+        case "ready", "new", "open", "loadMermaid", "closeEmptyWindow", "zoomWindow": fields = []
         case "workspaceChildren": fields = ["folderID", "generation", "showAll", "requestID"]
+        case "workspaceMetadata": fields = ["entryIDs", "generation", "requestID"]
         case "openWorkspaceEntry": fields = ["entryID", "generation", "requestID"]
+        case "openRecent": fields = ["entryID"]
+        case "rememberPosition": fields = ["documentID", "mode", "line", "fraction"]
+        case "exportDocument": fields = ["documentID", "printing", "mode"]
+        case "diagnostic": fields = ["event"]
         case "openUnsupported": fields = ["documentID"]
         case "readingMode": fields = ["enabled"]
         case "setPreference": fields = ["key", "value"]
@@ -60,10 +65,22 @@ public struct BridgeGate {
         }
         if kind == "state", !(boolean(object["dirty"]) && boolean(object["pending"])) { throw BridgeFailure.malformed }
         if kind == "readingMode", !boolean(object["enabled"]) { throw BridgeFailure.malformed }
+        if kind == "exportDocument", !boolean(object["printing"]) { throw BridgeFailure.malformed }
+        if kind == "exportDocument", !["edit", "source", "read"].contains(object["mode"] as? String ?? "") { throw BridgeFailure.malformed }
+        if kind == "diagnostic", !["globalError", "unhandledRejection", "editorException", "renderFailure", "imageFailure", "diagramFailure", "blockedNetwork"].contains(object["event"] as? String ?? "") { throw BridgeFailure.malformed }
+        if kind == "rememberPosition" {
+            guard let mode = object["mode"] as? String, let line = object["line"] as? NSNumber, let fraction = object["fraction"] as? NSNumber,
+                  CFGetTypeID(line) != CFBooleanGetTypeID(), CFGetTypeID(fraction) != CFBooleanGetTypeID(), line.doubleValue.rounded() == line.doubleValue,
+                  line.doubleValue > 0, line.doubleValue <= 10_000_000,
+                  ReadingPosition(mode: mode, line: line.intValue, fraction: fraction.doubleValue).valid else { throw BridgeFailure.malformed }
+        }
         for name in ["folderID", "entryID", "generation"] where fields.contains(name) {
             guard let id = object[name] as? String, UUID(uuidString: id) != nil else { throw BridgeFailure.malformed }
         }
         if kind == "workspaceChildren", !boolean(object["showAll"]) { throw BridgeFailure.malformed }
+        if kind == "workspaceMetadata" {
+            guard let ids = object["entryIDs"] as? [String], ids.count <= 4096, ids.allSatisfy({ UUID(uuidString: $0) != nil }) else { throw BridgeFailure.malformed }
+        }
         if kind == "setPreference" {
             guard let key = object["key"] as? String, let value = object["value"], ApplicationSettings.accepts(key, value) else { throw BridgeFailure.malformed }
         }

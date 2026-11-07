@@ -65,4 +65,4 @@ export function replacementChanges(text: string, query: string, replacement: str
   if (!query) return [];
   return [...text.matchAll(literalPattern(query))].map(match => ({ from: match.index, to: match.index + match[0].length, insert: replacement }));
 }
-function literalPattern(query: string): RegExp { return new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'giu'); }
+export function literalPattern(query: string): RegExp { return new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'giu'); }

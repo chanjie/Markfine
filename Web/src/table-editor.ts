@@ -62,6 +62,10 @@ export function tableTransaction(source: string, from: number, row: number, colu
 }
 const controllers = new WeakMap<HTMLElement, TableController>();
 export function tableHasFocus(view: EditorView): boolean { return !!view.dom.querySelector('.table-cell-editor.cm-focused'); }
+export function deleteTableCell(view: EditorView): boolean {
+  for (const element of view.dom.querySelectorAll<HTMLElement>('.live-table')) if (controllers.get(element)?.deleteFocusedCell()) return true;
+  return false;
+}
 export function tableComposing(view: EditorView): boolean {
   return [...view.dom.querySelectorAll<HTMLElement>('.live-table')].some(element => controllers.get(element)?.composing);
 }
@@ -104,6 +108,13 @@ class TableController {
   get composing(): boolean { return this.views.some(view => view.composing); }
   get start(): number { return this.from; }
   get end(): number { return this.from + this.source.length; }
+  deleteFocusedCell(): boolean { return this.clearCell(this.views.findIndex(view => view.dom.contains(document.activeElement))); }
+  private clearCell(index: number): boolean {
+    const cell = this.rows.flatMap(row => row.cells)[index];
+    if (!cell || this.parent.state.readOnly || this.composing) return false;
+    this.parent.dispatch({ changes: { from: cell.from, to: cell.to, insert: '' }, selection: EditorSelection.cursor(cell.from), userEvent: 'delete.cell', annotations: isolateHistory.of('full') });
+    queueMicrotask(() => this.focusSelection()); return true;
+  }
   sync(source: string, from: number) {
     this.source = source; this.from = from;
     const head = this.parent.state.selection.main.head;
@@ -125,7 +136,8 @@ class TableController {
           const view = new EditorView({ parent: td, state: EditorState.create({ doc: cell.text, extensions: [editorMarkdown(), cellInlinePresentation(), EditorView.lineWrapping,
             EditorView.editorAttributes.of({ class: 'table-cell-editor' }), EditorView.contentAttributes.of({ 'aria-label': row.header ? t('表头单元格', 'Table header cell') : t('表格单元格', 'Table cell') }),
             EditorState.transactionFilter.of(transaction => transaction.docChanged && (this.parent.state.readOnly || /[\r\n]/.test(transaction.newDoc.toString())) ? [] : transaction),
-             keymap.of([{ key: 'Tab', run: () => this.move(index, 1) }, { key: 'Shift-Tab', run: () => this.move(index, -1) },
+              keymap.of([{ key: 'Tab', run: () => this.move(index, 1) }, { key: 'Shift-Tab', run: () => this.move(index, -1) },
+               { key: 'Mod-Shift-k', run: () => this.clearCell(index) }, { key: 'Mod-Alt-Shift-k', run: () => this.clearCell(index) },
                ...(['left', 'right', 'up', 'down'] as const).map(direction => ({ key: 'Arrow' + direction[0].toUpperCase() + direction.slice(1), run: (view: EditorView) => this.arrow(view, index, direction) })),
               { key: 'Enter', run: () => this.move(index, row.cells.length) }, { key: 'Escape', run: () => { this.parent.focus(); return true; } },
               ...defaultKeymap]),

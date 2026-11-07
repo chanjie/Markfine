@@ -8,6 +8,28 @@ export { validateDiagram } from './diagrams';
 
 export const markdown = new MarkdownIt('commonmark', { html: false, typographer: false });
 installSelectedGFM(markdown);
+// HTML stays disabled. Comments are opaque escaped text, not executable markup or Markdown.
+markdown.inline.ruler.before('text', 'markfine-comment', (state, silent) => {
+  if (!state.src.startsWith('<!--', state.pos)) return false;
+  const end = state.src.indexOf('-->', state.pos + 4), to = end < 0 ? state.posMax : end + 3;
+  if (!silent) { const token = state.push('markfine_comment', '', 0); token.content = state.src.slice(state.pos, to); }
+  state.pos = to; return true;
+});
+markdown.renderer.rules.markfine_comment = (tokens, index) => `<span class="markdown-comment">${mappedText(markdown.utils.escapeHtml(tokens[index].content), tokens[index].meta)}</span>`;
+markdown.block.ruler.before('paragraph', 'markfine-comment-block', (state, start, end, silent) => {
+  const from = state.bMarks[start] + state.tShift[start];
+  if (state.sCount[start] - state.blkIndent >= 4 || !state.src.startsWith('<!--', from)) return false;
+  const limit = end < state.bMarks.length ? state.bMarks[end] : state.src.length;
+  const close = state.src.indexOf('-->', from + 4); let next = start + 1;
+  if (close >= 0 && close < limit) {
+    while (next < end && state.bMarks[next] <= close + 2) next++;
+    if (state.src.slice(close + 3, state.eMarks[next - 1]).trim()) return false;
+  } else next = end;
+  if (silent) return true;
+  const token = state.push('markfine_comment_block', '', 0); token.block = true; token.map = [start, next];
+  token.content = state.getLines(start, next, state.blkIndent, false).replace(/\n$/, ''); state.line = next; return true;
+});
+markdown.renderer.rules.markfine_comment_block = (tokens, index) => `<pre class="markdown-comment comment-block" data-source-line="${tokens[index].map?.[0] ?? 0}">${mappedText(markdown.utils.escapeHtml(tokens[index].content), tokens[index].meta)}</pre>\n`;
 const validateLink = markdown.validateLink;
 markdown.validateLink = href => validateLink(href) || /^file:/i.test(href) && safeLink(href);
 
