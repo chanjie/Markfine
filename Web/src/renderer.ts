@@ -1,10 +1,15 @@
 import MarkdownIt from 'markdown-it';
 import { annotateSourceMaps, boundaryAttribute, mappedText, projectSource, sourceMeta, type SyntaxBranch } from './source-projection';
 import { installSelectedGFM } from './gfm-extensions';
+import { safeLink } from './links';
+import { t } from './localization';
+import { highlightCode } from './code-highlighting';
 export { validateDiagram } from './diagrams';
 
 export const markdown = new MarkdownIt('commonmark', { html: false, typographer: false });
 installSelectedGFM(markdown);
+const validateLink = markdown.validateLink;
+markdown.validateLink = href => validateLink(href) || /^file:/i.test(href) && safeLink(href);
 
 const defaultText = markdown.renderer.rules.text!;
 markdown.renderer.rules.text = (tokens, index, options, env, renderer) =>
@@ -30,18 +35,14 @@ markdown.renderer.rules.image = (tokens, index, _options, env) => {
   const url = localImageURL(source, String(env?.documentID ?? ''));
   const escape = markdown.utils.escapeHtml;
   const boundary = boundaryAttribute(token.meta);
-  if (!url) return `<span class="image-placeholder"${boundary}>图片未加载 · ${escape(alt)} <code>${escape(source)}</code></span>`;
+  if (!url) return `<span class="image-placeholder"${boundary}>${t('图片未加载', 'Image not loaded')} · ${escape(alt)} <code>${escape(source)}</code></span>`;
   return `<img src="${escape(url)}" alt="${escape(alt)}" loading="lazy" decoding="async"${boundary}>`;
 };
 
 markdown.renderer.rules.link_open = (tokens, index) => {
   const token = tokens[index];
   const href = String(token.attrGet('href') ?? '');
-  let allowed = false;
-  try {
-    const url = new URL(href);
-    allowed = ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password;
-  } catch { /* Relative/unsafe navigation has no permission in this spike. */ }
+  const allowed = safeLink(href);
   token.meta = { allowed };
   const title = token.attrGet('title');
   const titleAttribute = title === null ? '' : ` title="${markdown.utils.escapeHtml(String(title))}"`;
@@ -61,11 +62,11 @@ markdown.renderer.rules.link_close = (tokens, index) => {
 const defaultFence = markdown.renderer.rules.fence!;
 markdown.renderer.rules.fence = (tokens, index, options, env, renderer) => {
   const token = tokens[index];
-  if (token.info.trim() === 'mermaid') return `<div class="diagram"${boundaryAttribute(token.meta)} data-source-line="${token.map?.[0] ?? 0}" data-diagram="${markdown.utils.escapeHtml(token.content)}"><pre><code>${markdown.utils.escapeHtml(token.content)}</code></pre><small>离线图表加载中</small></div>`;
-  if (!sourceMeta(token.meta).spikeSegments || options.highlight) return defaultFence(tokens, index, options, env, renderer);
-  const language = token.info.trim().split(/\s+/)[0];
+  if (token.info.trim() === 'mermaid') return `<div class="diagram"${boundaryAttribute(token.meta)} data-source-line="${token.map?.[0] ?? 0}" data-diagram="${markdown.utils.escapeHtml(token.content)}"><pre><code>${markdown.utils.escapeHtml(token.content)}</code></pre><small>${t('离线图表加载中', 'Loading offline diagram')}</small></div>`;
+  const language = markdown.utils.unescapeAll(token.info.trim()).split(/\s+/)[0];
+  if (!sourceMeta(token.meta).spikeSegments && !language || options.highlight) return defaultFence(tokens, index, options, env, renderer);
   const attr = language ? ` class="${markdown.utils.escapeHtml((options.langPrefix ?? 'language-') + language)}"` : '';
-  return `<pre data-source-line="${token.map?.[0] ?? 0}"><code${attr}>${mappedText(markdown.utils.escapeHtml(token.content), token.meta)}</code></pre>\n`;
+  return `<pre data-source-line="${token.map?.[0] ?? 0}"><code${attr}>${mappedText(highlightCode(token.content, language).html, token.meta)}</code></pre>\n`;
 };
 const defaultCodeBlock = markdown.renderer.rules.code_block!;
 markdown.renderer.rules.code_block = (tokens, index, options, env, renderer) => sourceMeta(tokens[index].meta).spikeSegments ?
@@ -97,7 +98,7 @@ const cache = new Map<string, string>();
 export function renderBlock(source: string, documentID: string, context: ReferenceContext = emptyReferences,
                             syntax?: { node: SyntaxBranch; from: number }): string {
   const projection = syntax ? projectSource(source, syntax.node, syntax.from, markdown.utils.unescapeAll) : undefined;
-  const key = `${documentID}\0${context.key}\0${source}\0${projection?.signature ?? 'unmapped'}`;
+  const key = `${t('zh', 'en')}\0${documentID}\0${context.key}\0${source}\0${projection?.signature ?? 'unmapped'}`;
   const hit = cache.get(key);
   if (hit !== undefined) return hit;
   // The block parser may add definitions to env. Never mutate a shared document context.
@@ -109,4 +110,11 @@ export function renderBlock(source: string, documentID: string, context: Referen
   if (cache.size >= 96) cache.delete(cache.keys().next().value!);
   cache.set(key, html);
   return html;
+}
+
+export function linkTarget(source: string, context: ReferenceContext = emptyReferences): string | null {
+  const tokens = markdown.parseInline(source, { references: Object.assign(Object.create(null), context.references) });
+  const token = tokens.flatMap(token => token.children ?? []).find(token => token.type === 'link_open');
+  const href = token?.attrGet('href');
+  return typeof href === 'string' && safeLink(href) ? href : null;
 }

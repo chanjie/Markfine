@@ -4,6 +4,11 @@ import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet } fr
 import { renderBlock, type ReferenceContext } from './renderer';
 import { referenceIndex, refreshReferences } from './reference-context';
 import { mappedCaretAtPoint } from './source-hit';
+import { editorPreferences, preferencesEffect, sourceMode, sourceModeEffect } from './editor-preferences';
+import { TableWidget } from './table-editor';
+import { inlineDecorations } from './inline-presentation';
+import { t } from './localization';
+import { highlightCode } from './code-highlighting';
 
 export const composingEffect = StateEffect.define<boolean>();
 const viewportEffect = StateEffect.define<{ from: number; to: number }>();
@@ -23,6 +28,24 @@ const viewport = StateField.define<{ from: number; to: number }>({
   }
 });
 
+class ListMarker extends WidgetType {
+  constructor(readonly text: string) { super(); }
+  eq(other: ListMarker) { return this.text === other.text; }
+  toDOM() { const element = document.createElement('span'); element.className = 'list-bullet'; element.textContent = this.text; element.setAttribute('aria-hidden', 'true'); return element; }
+}
+class TaskMarker extends WidgetType {
+  constructor(readonly from: number, readonly to: number, readonly checked: boolean) { super(); }
+  eq(other: TaskMarker) { return this.from === other.from && this.checked === other.checked; }
+  toDOM(view: EditorView) {
+    const button = document.createElement('button'); button.className = 'task-checkbox'; button.type = 'button'; button.setAttribute('role', 'checkbox');
+    button.setAttribute('aria-checked', String(this.checked)); button.setAttribute('aria-label', t('切换任务完成状态', 'Toggle task completion')); button.textContent = this.checked ? '☑' : '☐';
+    button.onmousedown = event => event.preventDefault(); button.onclick = () => {
+      if (!view.state.readOnly && !view.composing) view.dispatch({ changes: { from: this.from, to: this.to, insert: this.checked ? '[ ]' : '[x]' }, userEvent: 'input.task' });
+    }; return button;
+  }
+  ignoreEvent() { return true; }
+}
+
 class BlockWidget extends WidgetType {
   constructor(readonly source: string, readonly from: number, readonly documentID: string,
               readonly context: ReferenceContext, readonly hydrate: (element: HTMLElement) => void) { super(); }
@@ -34,11 +57,22 @@ class BlockWidget extends WidgetType {
     element.className = 'markdown-block';
     element.dataset.sourceFrom = String(this.from);
     element.dataset.sourceLength = String(this.source.length);
+    element.dataset.line = String(view.state.doc.lineAt(this.from).number);
+    element.classList.add('source-line-number');
     const node = view.state.field(referenceIndex).tree.topNode.childAfter(this.from);
     const syntax = node && node.from >= this.from && node.to <= this.from + this.source.length ? { node, from: this.from } : undefined;
     element.innerHTML = renderBlock(this.source, this.documentID, this.context, syntax);
     this.hydrate(element);
     return element;
+  }
+  updateDOM(element: HTMLElement, view: EditorView): boolean {
+    // Editing a diagram must not discard the last valid SVG while a new render is pending.
+    const current = element.querySelector<HTMLElement>('[data-diagram]'); if (!current) return false;
+    const next = document.createElement('div'); next.innerHTML = renderBlock(this.source, this.documentID, this.context);
+    const diagram = next.querySelector<HTMLElement>('[data-diagram]'); if (!diagram) return false;
+    element.dataset.sourceFrom = String(this.from); element.dataset.sourceLength = String(this.source.length); element.dataset.line = String(view.state.doc.lineAt(this.from).number);
+    current.dataset.diagram = diagram.dataset.diagram;
+    this.hydrate(element); return true;
   }
   ignoreEvent(event: Event): boolean {
     return event.target instanceof Element && !!event.target.closest('a');
@@ -65,10 +99,61 @@ export function previewBlockRanges(state: EditorState): { from: number; to: numb
 }
 
 function decorations(state: EditorState, documentID: string, hydrate: (element: HTMLElement) => void): DecorationSet {
-  const context = state.field(referenceIndex).context;
-  const widgets = previewBlockRanges(state).map(({ from, to, source }) =>
-    Decoration.replace({ widget: new BlockWidget(source, from, documentID, context, hydrate), block: true }).range(from, to));
-  return Decoration.set(widgets, true);
+  const index = state.field(referenceIndex), range = state.field(viewport);
+  const raw = state.field(sourceMode), numbers = state.field(editorPreferences).lineNumbers;
+  const result: ReturnType<Decoration['range']>[] = raw ? [] : inlineDecorations(state, index.tree, range.from, range.to, index.context);
+  const position = state.selection.main.head;
+  let active = index.tree.resolveInner(position, -1);
+  while (active.parent && !/^(Paragraph|Task|ATXHeading[1-6]|SetextHeading[12]|Table|FencedCode|CodeBlock|HTMLBlock)$/.test(active.name)) active = active.parent;
+  const focus = state.field(editorPreferences).focusMode;
+  const muted = (from: number, to: number) => focus && (active.name === 'Document' ? !(position >= from && position <= to) : (to < active.from || from > active.to));
+  const lines = new Map<number, Set<string>>();
+  const lineClass = (from: number, to: number, className: string) => {
+    for (let number = state.doc.lineAt(from).number; number <= state.doc.lineAt(to).number; number++) {
+      const start = state.doc.line(number).from;
+      if (!lines.has(start)) lines.set(start, new Set()); lines.get(start)!.add(className);
+    }
+  };
+  for (let n = state.doc.lineAt(Math.min(range.from, state.doc.length)).number; n <= state.doc.lineAt(Math.min(range.to, state.doc.length)).number; n++) {
+    const line = state.doc.line(n); lineClass(line.from, line.to, (muted(line.from, line.to) ? 'unfocused-block' : 'focused-block') + (raw ? ' source-line' : ''));
+  }
+  const mark = (from: number, to: number, className: string) => { if (to > from) result.push(Decoration.mark({ class: className }).range(from, to)); };
+  index.tree.iterate({ from: range.from, to: range.to, enter(ref) {
+    const node = ref.node, name = node.name;
+    if (raw && name !== 'FencedCode' && name !== 'CodeBlock') return;
+    if (name === 'Table') {
+      result.push(Decoration.replace({ widget: new TableWidget(state.sliceDoc(node.from, node.to), node.from, muted(node.from, node.to)), block: true }).range(node.from, node.to)); return false;
+    }
+    if (name === 'Image') {
+      const source = state.sliceDoc(node.from, node.to);
+      result.push(Decoration.widget({ widget: new BlockWidget(source, node.from, documentID, index.context, hydrate), side: 1 }).range(node.to));
+      mark(node.from, node.to, 'image-reference'); return false;
+    }
+    const heading = /^(?:ATXHeading|SetextHeading)([1-6])$/.exec(name);
+    if (heading) lineClass(node.from, node.to, `live-heading live-h${heading[1]}`);
+    if (name === 'Blockquote') lineClass(node.from, node.to, 'live-quote');
+    if (name === 'FencedCode' || name === 'CodeBlock') {
+      const source = state.sliceDoc(node.from, node.to);
+      const language = node.getChild('CodeInfo'), body = node.getChild('CodeText');
+      const info = language ? state.sliceDoc(language.from, language.to).trim().split(/\s+/)[0] : '';
+      if (!raw && info === 'mermaid') {
+        const widget = new BlockWidget(source, node.from, documentID, index.context, hydrate);
+        if (position >= node.from && position <= node.to) result.push(Decoration.widget({ widget, block: true, side: 1 }).range(node.to));
+        else { result.push(Decoration.replace({ widget, block: true }).range(node.from, node.to)); return false; }
+      }
+      if (body && info !== 'mermaid') for (const span of highlightCode(state.sliceDoc(body.from, body.to), info).ranges) mark(body.from + span.from, body.from + span.to, span.className);
+      if (!raw) lineClass(node.from, node.to, 'live-code'); return false;
+    }
+    if (name === 'HeaderMark') {
+      const end = name === 'HeaderMark' && /^ATX/.test(node.parent?.name ?? '') ? Math.min(node.to + 1, node.parent!.to) : node.to;
+      mark(node.from, end, 'syntax-marker');
+    }
+    if (name === 'QuoteMark') result.push(Decoration.replace({}).range(node.from, node.to));
+    if (name === 'ListMark' && /^[-+*]$/.test(state.sliceDoc(node.from, node.to))) result.push(Decoration.replace({ widget: new ListMarker('•') }).range(node.from, node.to));
+    if (name === 'TaskMarker') result.push(Decoration.replace({ widget: new TaskMarker(node.from, node.to, /x/i.test(state.sliceDoc(node.from, node.to))) }).range(node.from, node.to));
+  } });
+  for (const [from, classes] of lines) result.push(Decoration.line({ class: [...classes].join(' ') + (numbers ? ' source-line-number' : ''), attributes: numbers ? { 'data-line': String(state.doc.lineAt(from).number) } : undefined }).range(from));
+  return Decoration.set(result, true);
 }
 
 /** Prefer verified text maps; unsupported/non-text output retains explicit boundary/line fallback. */
@@ -116,7 +201,7 @@ export function blockPreview(documentID: string, hydrate: (element: HTMLElement)
     create: state => decorations(state, documentID, hydrate),
     update: (value, transaction) => {
       if (transaction.state.field(composition)) return value.map(transaction.changes);
-      if (transaction.docChanged || transaction.selection || transaction.effects.some(effect => effect.is(viewportEffect) || effect.is(composingEffect)) ||
+      if (transaction.docChanged || transaction.selection || transaction.effects.some(effect => effect.is(viewportEffect) || effect.is(composingEffect) || effect.is(preferencesEffect) || effect.is(sourceModeEffect)) ||
           transaction.startState.field(referenceIndex) !== transaction.state.field(referenceIndex)) return decorations(transaction.state, documentID, hydrate);
       return value;
     },
@@ -148,7 +233,7 @@ export function blockPreview(documentID: string, hydrate: (element: HTMLElement)
     }
     destroy() { cancelAnimationFrame(this.frame); }
   });
-  return [composition, viewport, referenceIndex, field, visible, renderedSelection, EditorView.domEventHandlers({
+  return [composition, viewport, referenceIndex, editorPreferences, sourceMode, field, visible, renderedSelection, EditorView.domEventHandlers({
     compositionstart: (_event, view) => { view.dispatch({ effects: composingEffect.of(true) }); return false; },
     compositionend: (_event, view) => {
       queueMicrotask(() => { if (!view.composing) view.dispatch({ effects: composingEffect.of(false) }); });

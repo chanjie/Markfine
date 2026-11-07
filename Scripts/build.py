@@ -19,7 +19,7 @@ WORK = ROOT / "Build/Product"
 
 def source_files():
     """Only shared product inputs; local tests and workspace files never affect the build."""
-    files = [ROOT / "Package.swift", ROOT / "Config/Build.json", ROOT / "Scripts/build.py"]
+    files = [ROOT / "Package.swift", ROOT / "LICENSE", ROOT / "Config/Build.json", ROOT / "Config/Markfine.png", ROOT / "Config/Markfine.icns", ROOT / "Scripts/build.py", ROOT / "Scripts/draw-icon.swift"]
     files += [ROOT / "Web" / name for name in ["package.json", "package-lock.json", "tsconfig.json", "build.mjs", "index.html", "style.css"]]
     for directory in ["Sources", "Web/src"]:
         files += [path for path in (ROOT / directory).rglob("*") if path.is_file() and path.suffix in [".swift", ".ts"]]
@@ -107,13 +107,17 @@ def build(configuration, env):
     (app / "Contents/Resources").mkdir()
     shutil.copy2(binary_directory / "Markfine", app / "Contents/MacOS/Markfine")
     shutil.copytree(directory / "Editor", app / "Contents/Resources/Editor")
+    shutil.copy2(ROOT / "Config/Markfine.icns", app / "Contents/Resources/Markfine.icns")
+    shutil.copy2(ROOT / "LICENSE", app / "Contents/Resources/LICENSE.txt")
     info = {
         "CFBundleDevelopmentRegion": "zh_CN", "CFBundleExecutable": "Markfine", "CFBundleName": "Markfine",
         "CFBundleDisplayName": "Markfine", "CFBundleIdentifier": "local.markfine.Markfine", "CFBundlePackageType": "APPL",
+        "CFBundleIconFile": "Markfine.icns",
+        "CFBundleLocalizations": ["zh_CN", "en"],
         "CFBundleShortVersionString": config["version"], "CFBundleVersion": str(config["build"]),
         "LSMinimumSystemVersion": "13.0", "NSHighResolutionCapable": True, "NSPrincipalClass": "NSApplication",
         "MarkfineBuildStage": config["stage"], "MarkfineInputID": input_id,
-        "NSHumanReadableCopyright": "Third-party licenses: Contents/Resources/Editor/ThirdPartyNotices.txt",
+        "NSHumanReadableCopyright": "Copyright © 2026 Markfine contributors. MIT License. Third-party components retain their own licenses.",
         "CFBundleDocumentTypes": [{"CFBundleTypeName": "Markdown document", "CFBundleTypeRole": "Editor", "LSHandlerRank": "Alternate",
                                    "LSItemContentTypes": ["net.daringfireball.markdown"]}],
         "UTImportedTypeDeclarations": [{"UTTypeIdentifier": "net.daringfireball.markdown", "UTTypeDescription": "Markdown document",

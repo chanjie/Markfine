@@ -1,5 +1,6 @@
 import type { MarkdownIt } from 'markdown-it';
 import { editorMarkdownLanguage } from './editor-language';
+import { t } from './localization';
 
 /** Candidate adapter: share the declared GFM lexer instead of accepting the libraries' differing defaults. */
 export function installSelectedGFM(md: MarkdownIt): void {
@@ -86,7 +87,7 @@ export function installSelectedGFM(md: MarkdownIt): void {
       md.inline.parse(token.content.slice(match[0].length), md, state.env, body);
       const checked = match[1] !== ' ';
       const marker = new state.Token('html_inline', '', 0);
-      marker.content = `<input ${checked ? 'checked="" ' : ''}disabled="" type="checkbox" class="task-marker" aria-label="${checked ? '已完成' : '未完成'}"> `;
+      marker.content = `<input ${checked ? 'checked="" ' : ''}disabled="" type="checkbox" class="task-marker" aria-label="${checked ? t('已完成', 'Completed') : t('未完成', 'Incomplete')}"> `;
       token.children = [marker, ...body];
     });
   });

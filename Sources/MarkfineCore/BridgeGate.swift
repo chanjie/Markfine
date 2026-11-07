@@ -25,7 +25,13 @@ public struct BridgeGate {
         let common: Set<String> = ["protocolVersion", "sessionID", "capability", "kind"]
         let fields: Set<String>
         switch kind {
-        case "ready", "new", "open", "loadMermaid": fields = []
+        case "ready", "new", "open", "loadMermaid", "closeEmptyWindow": fields = []
+        case "workspaceChildren": fields = ["folderID", "generation", "showAll", "requestID"]
+        case "openWorkspaceEntry": fields = ["entryID", "generation", "requestID"]
+        case "openUnsupported": fields = ["documentID"]
+        case "readingMode": fields = ["enabled"]
+        case "setPreference": fields = ["key", "value"]
+        case "openLink": fields = ["documentID", "href"]
         case "state": fields = ["documentID", "revision", "dirty", "pending"]
         case "activeDocument": fields = ["documentID"]
         case "save": fields = ["documentID", "requestID", "revision", "snapshot"]
@@ -53,6 +59,18 @@ public struct BridgeGate {
             return CFGetTypeID(number) == CFBooleanGetTypeID()
         }
         if kind == "state", !(boolean(object["dirty"]) && boolean(object["pending"])) { throw BridgeFailure.malformed }
+        if kind == "readingMode", !boolean(object["enabled"]) { throw BridgeFailure.malformed }
+        for name in ["folderID", "entryID", "generation"] where fields.contains(name) {
+            guard let id = object[name] as? String, UUID(uuidString: id) != nil else { throw BridgeFailure.malformed }
+        }
+        if kind == "workspaceChildren", !boolean(object["showAll"]) { throw BridgeFailure.malformed }
+        if kind == "setPreference" {
+            guard let key = object["key"] as? String, let value = object["value"], ApplicationSettings.accepts(key, value) else { throw BridgeFailure.malformed }
+        }
+        if kind == "openLink" {
+            guard let href = object["href"] as? String, !href.isEmpty, href.utf16.count <= 8192,
+                  href.rangeOfCharacter(from: .controlCharacters) == nil else { throw BridgeFailure.malformed }
+        }
         if kind == "closeAllResult" {
             guard boolean(object["permitted"]), let items = object["documents"] as? [[String: Any]], items.count <= 1_000,
                   items.allSatisfy({ item in

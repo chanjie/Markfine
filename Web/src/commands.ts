@@ -1,4 +1,5 @@
 import { EditorSelection, type EditorState, type TransactionSpec } from '@codemirror/state';
+import { t } from './localization';
 
 export function formatTransaction(state: EditorState, action: string): TransactionSpec | null {
   const selection = state.selection.main;
@@ -18,7 +19,7 @@ export function formatTransaction(state: EditorState, action: string): Transacti
     return edit(mark + selected + mark, from + mark.length, to + mark.length);
   }
   if (action === 'link' || action === 'image') {
-    const label = selected || (action === 'image' ? '图片' : '链接文字'), target = action === 'image' ? 'image.png' : 'https://';
+    const label = selected || (action === 'image' ? t('图片', 'Image') : t('链接文字', 'Link text')), target = action === 'image' ? 'image.png' : 'https://';
     const prefix = `${action === 'image' ? '!' : ''}[${label}](`;
     return edit(prefix + target + ')', from + prefix.length, from + prefix.length + target.length);
   }
@@ -26,7 +27,7 @@ export function formatTransaction(state: EditorState, action: string): Transacti
     const insert = '```\n' + selected + '\n```';
     return edit(insert, from + 4, from + 4 + selected.length);
   }
-  if (action === 'table') return edit('\n| 标题 | 标题 |\n| --- | --- |\n| 内容 | 内容 |\n');
+  if (action === 'table') return edit(t('\n| 标题 | 标题 |\n| --- | --- |\n| 内容 | 内容 |\n', '\n| Heading | Heading |\n| --- | --- |\n| Content | Content |\n'));
   const first = state.doc.lineAt(from), last = state.doc.lineAt(to > from && state.doc.lineAt(to).from === to ? to - 1 : to);
   const lines = state.sliceDoc(first.from, last.to).split('\n');
   const heading = /^heading([0-6])$/.exec(action);

@@ -2,6 +2,7 @@
 .build/
 Build/
 Dist/
+/release/
 node_modules/
 __pycache__/
 *.pyc

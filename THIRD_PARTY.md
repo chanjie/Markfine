@@ -1,5 +1,7 @@
 # 第三方依赖与许可
 
+Markfine 自有代码与文档采用根 `LICENSE` 的 MIT 许可，随应用提供 `Contents/Resources/LICENSE.txt`。下列第三方组件保留其各自许可，不因项目采用 MIT 而被重新许可。
+
 精确依赖及 integrity 见 `Web/package.json`、`Web/package-lock.json`。修改版本需显式更新锁文件，不在运行时下载或自动升级依赖。
 
 | 直接依赖 | 版本 | 包声明许可 |
@@ -11,6 +13,7 @@
 | @codemirror/view | 6.43.15 | MIT |
 | markdown-it | 15.0.3 | MIT |
 | mermaid（标准版） | 12.3.0 | MIT |
+| highlight.js（仅打包选定语言） | 11.12.0 | BSD-3-Clause |
 | @types/markdown-it（开发） | 14.2.0 | MIT |
 | esbuild（开发） | 0.28.2 | MIT |
 | typescript（开发） | 7.0.2 | Apache-2.0 |

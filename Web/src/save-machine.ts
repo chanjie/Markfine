@@ -1,6 +1,7 @@
 import { Text } from '@codemirror/state';
 import { migrateImageReferences } from './migration';
 import { newID } from './protocol';
+import { t } from './localization';
 
 export interface Context { protocolVersion: 1; sessionID: string; capability: string }
 export type Outcome = 'success' | 'failure' | 'cancelled' | 'conflict' | 'unconfirmed';
@@ -37,7 +38,7 @@ export class SaveMachine {
     const requestID = this.makeID(), text = this.current, revision = this.revision;
     const timer = setTimeout(() => {
       if (this.pending?.requestID !== requestID) return;
-      this.state = 'unconfirmed'; this.error = '保存结果未确认，请保留文档，不要强制关闭'; this.changed();
+      this.state = 'unconfirmed'; this.error = t('保存结果未确认，请保留文档，不要强制关闭', 'Save unconfirmed. Keep the document open; do not force quit'); this.changed();
     }, this.timeoutMS);
     this.pending = { requestID, revision, text, timer }; this.state = 'saving'; this.error = ''; this.changed();
     this.send({ ...this.fields(), kind: 'save', documentID: this.documentID, requestID, revision,

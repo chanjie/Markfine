@@ -4,7 +4,7 @@ import { localImageURL } from './renderer';
 
 const placeholder = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aM1kAAAAASUVORK5CYII=';
 mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', suppressErrorRendering: true,
-  htmlLabels: false, flowchart: { htmlLabels: false }, theme: 'neutral', fontFamily: 'Avenir Next, PingFang SC, sans-serif', maxTextSize: 20_000,
+  htmlLabels: false, flowchart: { htmlLabels: false }, theme: 'neutral', themeVariables: { fontSize: '20px' }, fontFamily: 'Markfine Latin, Markfine CJK, PingFang SC, sans-serif', maxTextSize: 20_000,
   secure: ['securityLevel', 'startOnLoad', 'maxTextSize', 'htmlLabels', 'flowchart', 'secure', 'suppressErrorRendering', 'fontFamily'] });
 let serial: Promise<unknown> = Promise.resolve();
 let sequence = 0;
@@ -26,7 +26,7 @@ globalThis.__markfineRenderDiagram = (source, documentID) => {
     const prepared = prepareDiagram(source, documentID);
     const { svg } = await mermaid.render(`markfine-diagram-${++sequence}`, prepared);
     const parsed = new DOMParser().parseFromString(svg, 'image/svg+xml'), element = parsed.documentElement;
-    if (element.localName !== 'svg' || parsed.querySelector('parsererror')) throw new Error('图表 SVG 无效');
+    if (element.localName !== 'svg' || parsed.querySelector('parsererror')) throw new Error(document.documentElement.lang.startsWith('en') ? 'Invalid diagram SVG' : '图表 SVG 无效');
     element.querySelectorAll('script,foreignObject,iframe,object,embed,a,animate,animateTransform,set').forEach(node => node.remove());
     for (const node of [element, ...element.querySelectorAll('*')]) {
       for (const attr of [...node.attributes]) {
@@ -39,7 +39,7 @@ globalThis.__markfineRenderDiagram = (source, documentID) => {
       if (node.localName === 'style' && !safeCSS(node.textContent ?? '')) node.remove();
     }
     const result = document.importNode(element, true) as unknown as SVGElement;
-    result.setAttribute('role', 'img'); result.setAttribute('aria-label', '离线 Mermaid 图表');
+    result.setAttribute('role', 'img'); result.setAttribute('aria-label', document.documentElement.lang.startsWith('en') ? 'Offline Mermaid diagram' : '离线 Mermaid 图表');
     return result;
   });
   serial = render.catch(() => undefined); return render;

@@ -1,0 +1,21 @@
+let nativeEnglish: [String: String] = [
+    "源码模式": "Source Mode",
+    "关于 Markfine": "About Markfine", "首选项…": "Preferences…", "隐藏 Markfine": "Hide Markfine", "退出 Markfine": "Quit Markfine",
+    "文件": "File", "新建": "New", "新建标签页": "New Tab", "打开…": "Open…", "保存": "Save", "关闭标签页": "Close Tab", "关闭窗口": "Close Window",
+    "编辑": "Edit", "撤销": "Undo", "重做": "Redo", "剪切": "Cut", "复制": "Copy", "全选": "Select All", "粘贴": "Paste",
+    "查找": "Find", "显示替换": "Show Replace", "下一个匹配": "Find Next", "上一个匹配": "Find Previous", "格式": "Format",
+    "标题 1": "Heading 1", "标题 2": "Heading 2", "标题 3": "Heading 3", "标题 4": "Heading 4", "标题 5": "Heading 5", "标题 6": "Heading 6",
+    "普通段落": "Paragraph", "加粗": "Bold", "斜体": "Italic", "行内代码": "Inline Code", "删除线": "Strikethrough", "链接": "Link",
+    "图片引用": "Image", "代码块": "Code Block", "引用块": "Blockquote", "有序列表": "Ordered List", "无序列表": "Unordered List", "任务列表": "Task List",
+    "表格": "Table", "增加缩进": "Indent", "减少缩进": "Outdent", "显示": "View", "显示／隐藏目录": "Toggle Outline",
+    "阅读／编辑模式": "Toggle Reading Mode", "显示／隐藏行号": "Toggle Line Numbers", "放大内容": "Zoom In", "缩小内容": "Zoom Out", "恢复实际大小": "Actual Size",
+    "窗口": "Window", "最小化": "Minimize", "下一标签页": "Next Tab", "上一标签页": "Previous Tab", "帮助": "Help", "快捷键说明": "Keyboard Shortcuts",
+    "未命名": "Untitled", "未命名.md": "Untitled.md",
+    "文档会话已失效": "The document session is no longer valid", "保存请求无效": "Invalid save request", "拒绝重复保存请求": "Duplicate save request rejected", "拒绝旧版本保存请求": "Stale save request rejected",
+    "首次保存需要用户选择目标": "Choose a destination for the first save", "替换已有文件需要系统确认": "Replacing an existing file requires confirmation", "目标已在另一文档中打开，不能覆盖": "The destination is open in another tab and cannot be overwritten", "当前版本不提供另存为": "Save As is not available",
+    "无效文件位置": "Invalid file location", "只能打开或保存普通文件": "Only regular files can be opened or saved", "文档不是有效 UTF-8，未替换或丢弃原始字节": "The document is not valid UTF-8. No original bytes were changed or discarded",
+    "原文件已被外部更改、删除或移走；已停止保存并保留编辑": "The original file was changed, deleted or moved externally. Saving stopped; your edits are retained",
+    "保存可能已提交但结果未确认；保留编辑，不自动重试或关闭": "Saving may have committed, but is unconfirmed. Keep your edits; do not retry or close automatically",
+    "图片路径超出当前文档权限或存在不安全路径": "The image path is unsafe or outside document permissions", "剪贴板没有可用的 PNG、JPEG、TIFF 图片或纯文本": "The clipboard contains no supported PNG, JPEG, TIFF or plain text",
+    "图片数据无效或过大，未改变正文": "The image is invalid or too large. The document is unchanged", "资源目录被占用或不可写；正文未改变，图片暂存已保留": "The asset directory is unavailable or not writable. The document and staged image are retained", "无法读取或写入本地图片，正文与暂存均保留": "Cannot read or write the local image. The document and staged images are retained"
+]
