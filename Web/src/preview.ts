@@ -183,7 +183,7 @@ function renderedPosition(view: EditorView, target: EventTarget | null, point: {
 }
 
 const renderedSelection = EditorView.mouseSelectionStyle.of((view, event) => {
-  if (event.button !== 0 || view.composing || view.state.field(composition) ||
+  if (event.button !== 0 || event.ctrlKey || view.composing || view.state.field(composition) ||
       (event.target instanceof Element && event.target.closest('a'))) return null;
   let start = renderedPosition(view, event.target, { x: event.clientX, y: event.clientY });
   if (start === null) return null;

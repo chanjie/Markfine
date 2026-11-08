@@ -202,7 +202,7 @@ public actor FileDocumentStore {
                     throw error
                 }
                 if record.url != nil {
-                    guard let original, original.stamp == record.baseline else { throw FileStoreFailure.externalChange }
+                    guard let original, let baseline = record.baseline, original.stamp.matchesBaseline(baseline) else { throw FileStoreFailure.externalChange }
                 } else {
                     if let observation = firstTarget?.observation {
                         guard observation.parent == directory.identity, original?.stamp == observation.stamp else { throw FileStoreFailure.externalChange }
@@ -276,7 +276,13 @@ public actor FileDocumentStore {
         }
         guard fsync(temporary.value) == 0 else { throw Self.io("sync temporary") }
         let current = try ReadFile(directory: directory, name: url.lastPathComponent, allowMissing: true)
-        guard current?.stamp == original?.stamp else { throw FileStoreFailure.externalChange }
+        if let original {
+            guard let current, current.stamp.matchesBaseline(original.stamp) else { throw FileStoreFailure.externalChange }
+        } else if current != nil { throw FileStoreFailure.externalChange }
+        if let usage = current?.stamp.metadata.lastUsed, usage != original?.stamp.metadata.lastUsed {
+            guard usage.withUnsafeBytes({ fsetxattr(temporary.value, "com.apple.lastuseddate#PS", $0.baseAddress, $0.count, 0, 0) }) == 0,
+                  fsync(temporary.value) == 0 else { throw Self.io("preserve usage metadata") }
+        }
         try directory.verifyLocation()
         let result: Int32
         if original == nil {
@@ -294,7 +300,8 @@ public actor FileDocumentStore {
             guard fsync(directory.fd.value) == 0 else { throw Self.io("sync directory") }
             var info = stat()
             guard fstat(temporary.value, &info) == 0 else { throw Self.io("stat committed") }
-            return DiskStamp(info: info, parent: directory.identity, data: data)
+            guard let committed = try ReadFile(directory: directory, name: url.lastPathComponent, allowMissing: false, expectedIdentity: FileIdentity(info)), committed.data == data else { throw FileStoreFailure.commitUnconfirmed }
+            return committed.stamp
         } catch { throw FileStoreFailure.commitUnconfirmed }
     }
 
@@ -358,8 +365,15 @@ fileprivate struct DiskStamp: Equatable, Sendable {
     let changedNanos: Int64
     let mode: UInt16
     let digest: String
+    let owner: UInt32
+    let group: UInt32
+    let flags: UInt32
+    let links: UInt16
+    let createdSeconds: Int64
+    let createdNanos: Int64
+    let metadata: FileMetadata
 
-    init(info: stat, parent: FileIdentity, data: Data) {
+    init(info: stat, parent: FileIdentity, data: Data, metadata: FileMetadata) {
         file = FileIdentity(info)
         self.parent = parent
         size = Int64(info.st_size)
@@ -369,6 +383,77 @@ fileprivate struct DiskStamp: Equatable, Sendable {
         changedNanos = Int64(info.st_ctimespec.tv_nsec)
         mode = UInt16(info.st_mode)
         digest = EditorResources.sha256(data)
+        owner = info.st_uid; group = info.st_gid; flags = info.st_flags; links = info.st_nlink
+        createdSeconds = Int64(info.st_birthtimespec.tv_sec); createdNanos = Int64(info.st_birthtimespec.tv_nsec)
+        self.metadata = metadata
+    }
+
+    func matchesBaseline(_ previous: DiskStamp) -> Bool {
+        if self == previous { return true }
+        // LaunchServices updates this usage attribute after delivering an open-file
+        // event. It is not a document edit. Do not ignore ctime generally: accept
+        // only a changed usage timestamp with all other observed metadata intact.
+        return metadata.advancedUsageDate(from: previous.metadata) &&
+            file == previous.file && parent == previous.parent && size == previous.size &&
+            modifiedSeconds == previous.modifiedSeconds && modifiedNanos == previous.modifiedNanos &&
+            mode == previous.mode && owner == previous.owner && group == previous.group &&
+            flags == previous.flags && links == previous.links && digest == previous.digest &&
+            createdSeconds == previous.createdSeconds && createdNanos == previous.createdNanos &&
+            metadata.attributes == previous.metadata.attributes && metadata.acl == previous.metadata.acl
+    }
+}
+
+fileprivate struct FileMetadata: Equatable, Sendable {
+    let attributes: [String: String]
+    let lastUsed: Data?
+    let acl: String
+
+    init(_ fd: Int32) throws {
+        let length = flistxattr(fd, nil, 0, 0)
+        guard length >= 0, length <= 1_048_576 else { throw FileDocumentStore.io("list metadata") }
+        var names = [CChar](repeating: 0, count: max(1, length))
+        let count = flistxattr(fd, &names, length, 0)
+        guard count >= 0 else { throw FileDocumentStore.io("read metadata names") }
+        guard count <= length else { throw FileStoreFailure.posix(operation: "read metadata names", code: ERANGE) }
+        let entries = names.prefix(count).split(separator: 0)
+        guard entries.count <= 256 else { throw FileStoreFailure.tooLarge }
+        var attributes: [String: String] = [:], usage: Data?, total = 0
+        for name in entries.map({ String(decoding: $0.map { UInt8(bitPattern: $0) }, as: UTF8.self) }) {
+            let size = fgetxattr(fd, name, nil, 0, 0, 0)
+            guard size >= 0 else { throw FileDocumentStore.io("metadata size") }
+            guard size <= 16 * 1_048_576 - total else { throw FileStoreFailure.tooLarge }; total += size
+            var bytes = [UInt8](repeating: 0, count: max(1, size))
+            let read = fgetxattr(fd, name, &bytes, size, 0, 0)
+            guard read >= 0 else { throw FileDocumentStore.io("read metadata") }
+            guard read == size else { throw FileStoreFailure.posix(operation: "read metadata", code: ERANGE) }
+            let data = Data(bytes.prefix(size))
+            if name == "com.apple.lastuseddate#PS" { usage = data }
+            else { attributes[name] = EditorResources.sha256(data) }
+        }
+        lastUsed = usage
+        self.attributes = attributes
+        guard let access = acl_get_fd(fd) else {
+            if errno == ENOENT { acl = ""; return } // A regular file may have no extended ACL.
+            throw FileDocumentStore.io("read ACL")
+        }
+        defer { acl_free(UnsafeMutableRawPointer(access)) }
+        var size = 0
+        guard let text = acl_to_text(access, &size), size >= 0 else { throw FileDocumentStore.io("read ACL text") }
+        defer { acl_free(text) }
+        acl = EditorResources.sha256(Data(bytes: text, count: size))
+    }
+
+    func advancedUsageDate(from previous: FileMetadata) -> Bool {
+        func date(_ data: Data?) -> (Int64, Int64)? {
+            guard let data, data.count == 16 else { return nil }
+            let seconds = data.withUnsafeBytes { $0.loadUnaligned(as: Int64.self) }
+            let nanos = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 8, as: Int64.self) }
+            return seconds > 0 && nanos >= 0 && nanos < 1_000_000_000 ? (seconds, nanos) : nil
+        }
+        guard lastUsed != previous.lastUsed, let next = date(lastUsed) else { return false }
+        guard previous.lastUsed != nil else { return true }
+        guard let before = date(previous.lastUsed) else { return false }
+        return next.0 > before.0 || next.0 == before.0 && next.1 > before.1
     }
 }
 
@@ -403,11 +488,15 @@ private struct ReadFile {
         if raw < 0 && errno == ENOENT && allowMissing { return nil }
         guard raw >= 0 else { throw FileDocumentStore.io("open file") }
         fd = OwnedFD(raw)
+        for attempt in 0..<3 {
+        do {
+        guard lseek(raw, 0, SEEK_SET) == 0 else { throw FileDocumentStore.io("rewind read") }
         var before = stat()
         guard fstat(raw, &before) == 0 else { throw FileDocumentStore.io("stat file") }
         guard before.st_mode & S_IFMT == S_IFREG, before.st_size >= 0 else { throw FileStoreFailure.notRegularFile }
         if let expectedIdentity, FileIdentity(before) != expectedIdentity { throw FileStoreFailure.externalChange }
         guard before.st_size <= TextDocument.maximumBytes else { throw FileStoreFailure.tooLarge }
+        let beforeMetadata = try FileMetadata(raw)
         var data = Data()
         var bytes = [UInt8](repeating: 0, count: 65_536)
         while true {
@@ -420,12 +509,27 @@ private struct ReadFile {
             data.append(contentsOf: bytes.prefix(count))
             guard data.count <= before.st_size else { throw FileStoreFailure.externalChange }
         }
+        let afterMetadata = try FileMetadata(raw)
         var after = stat()
         guard fstat(raw, &after) == 0 else { throw FileDocumentStore.io("stat after read") }
-        let initial = DiskStamp(info: before, parent: directory.identity, data: data)
-        let final = DiskStamp(info: after, parent: directory.identity, data: data)
-        guard initial == final, Int64(data.count) == after.st_size else { throw FileStoreFailure.externalChange }
+        let initial = DiskStamp(info: before, parent: directory.identity, data: data, metadata: beforeMetadata)
+        let final = DiskStamp(info: after, parent: directory.identity, data: data, metadata: afterMetadata)
+        if initial != final {
+            // Retry the complete read, never approve an unstable buffer. This
+            // also covers updates between stat and the first metadata snapshot.
+            // Saving still compares the final stable snapshot to its old baseline.
+            if attempt < 2 { continue }
+            throw FileStoreFailure.externalChange
+        }
+        guard Int64(data.count) == after.st_size else { throw FileStoreFailure.externalChange }
         self.data = data
         stamp = final
+        return
+        } catch FileStoreFailure.posix(let operation, let code) where attempt < 2 &&
+            ["list metadata", "read metadata names", "metadata size", "read metadata"].contains(operation) && [ERANGE, ENOATTR, EINTR].contains(code) {
+            continue
+        }
+        }
+        throw FileStoreFailure.externalChange
     }
 }

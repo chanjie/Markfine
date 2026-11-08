@@ -6,6 +6,14 @@ import { editorPreferences, sourceMode } from './editor-preferences';
 import { highlightCode } from './code-highlighting';
 
 interface Endings { breaks: { at: number; separator: string }[]; preferred: string; key: string }
+export function encodedTextBytes(source: string, encoding: string): number {
+  if (encoding === 'UTF-16 LE' || encoding === 'UTF-16 BE') return 2 + source.length * 2;
+  if (encoding === 'UTF-32 LE' || encoding === 'UTF-32 BE') {
+    let characters = 0; for (const _character of source) characters++;
+    return 4 + characters * 4;
+  }
+  return new TextEncoder().encode(source).length + (encoding === 'UTF-8 BOM' ? 3 : 0);
+}
 const endingKey = (breaks: Endings['breaks']) => breaks.map(entry => entry.separator === '\r\n' ? 'c' : entry.separator === '\r' ? 'r' : 'n').join('');
 const restoreEndings = StateEffect.define<Endings>({ map: (value, changes) => ({ ...value, breaks: value.breaks.map(entry => ({ ...entry, at: changes.mapPos(entry.at, 1) })) }) });
 export const lineEndings = StateField.define<Endings>({

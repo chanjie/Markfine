@@ -105,9 +105,9 @@ python3 Scripts/release.py Dist/<最终构建目录>/<本次构建> --notes <本
 - 打开队列覆盖读取与注册回执，不仅串行磁盘 I/O；新读入的工作区文档在注册前再次验证根身份／选定 inode。旧 `load` 可以暂存为不可见预览状态，以便最新同文件请求复用其身份；最新请求成功或 `openFailed(openRequestID)` 后再经关闭协调回收旧预览，不能先销毁即将复用的文档身份。
 - WorkspaceStore 固定根描述符并验证磁盘身份，子目录逐层 `openat(O_NOFOLLOW)`；枚举使用独立 open file description，不以 dup 共享目录游标。目录代次、符号链接、失败及旧回执均要校验，不能把打开文件夹等同于所有文档图片可读整个根。
 - 文件树保留原条目路径至描述符检查，不先解析符号链接。`fileSelection`返回原生URL与已核对身份，`FileDocumentStore.open(expectedIdentity:)`在读取正文前核对descriptor的设备／inode，读取后仍复查根与代次。
-- 文本支持UTF-8与BOM标记的UTF-16/32；解码往返验证，不丢弃字节。打开／原编码保存上限16MiB；Web保存快照在发送前检查UTF-8体积并保持失败回执状态。换行位置在同一EditorState字段随changes与undo映射，不建第二份正文。纯文本原生会话不登记ImageStore，保存不迁移图片，复制／粘贴仅文本，导出按转义原文处理。
+- 文本支持UTF-8与BOM标记的UTF-16/32；解码往返验证，不丢弃字节。打开／原编码保存上限16MiB，包含BOM；Web按装载时原生登记的编码预检，原生编码器仍作最终限制。保存桥接快照的UTF-8传输上限为24MiB，以容纳合法UTF-16文本的展开，不扩大磁盘文件上限。换行位置在同一EditorState字段随changes与undo映射，不建第二份正文。纯文本原生会话不登记ImageStore，保存不迁移图片，复制／粘贴仅文本，导出按转义原文处理。
 - `RecentLocations`按来源保存有界元数据：直接记录与仅文件夹来源各最多20条，展示最多20条；`showWorkspaceRecents`默认false。旧URL数组惰性迁移为直接／未知来源，不回扫文件夹推断历史。原生菜单与Web空白页共用已过滤的不透明ID列表；恢复默认只关闭开关，清空记录才清两类历史。
-- 复制范围不通过改变选区来生成；进度及成功反馈采用独立fixed覆盖层，只有原生成功回执才短暂显示成功。右键mousedown在CodeMirror及浏览器默认选词之前阻止选区更改；菜单焦点使用preventScroll，不把DOM事件检查视为物理右键验收。
+- 复制范围不通过改变选区来生成；进度及成功反馈采用独立fixed覆盖层，只有原生成功回执才短暂显示成功。正文右键使用受控复制／剪切／粘贴菜单，阻止WebKit原生菜单自动选词；右键与Control单击不进入正文拖选。菜单焦点使用preventScroll，不把DOM事件检查视为物理右键验收。
 - `WorkspaceEntry.modified` 是无跟随 stat 得到的毫秒时间。进入文件导航可请求 `workspaceMetadata(entryIDs,generation,requestID)`，每批最多4096个已登记UUID；回执同代次／请求加 `dates`，只刷新现有DOM时间，不重建点击目标、不读文件正文、不递归遍历。左右栏各有贯穿可用高度的键盘／指针分隔条，同侧目录与文件树共享宽度。
 - `diagnostic(event)` 只接受固定事件枚举，不允许正文、URL、路径、堆栈或任意消息字段。Web同类事件5秒节流；原生捕获到的Error只提取类型、白名单错误域和码，绝不序列化NSError.userInfo／localizedDescription；POSIX失败保留真正errno而非Swift枚举序号。`RuntimeDataStore.record` 与清理共用管理锁，每次通过 `openat(O_NOFOLLOW)` 重新打开固定文件，拒绝符号链接／硬链接和特殊文件，五份约2MiB轮转。不能因日志写入失败递归产生日志。
 - 导出控制器返回明确 `cancelled/exported/printed`，只有系统保存面板确认后才申请本地通知权限；成功原子写入后发送一次通知，失败保留编辑并通知，取消不发送失败通知。前台通知通过本地UNUserNotificationCenter委托申请横幅／列表呈现，OS权限或勿扰可能抑制；没有远程推送注册或请求。
@@ -115,6 +115,7 @@ python3 Scripts/release.py Dist/<最终构建目录>/<本次构建> --notes <本
 ## 4. 文件、图片与安全约束
 
 - `FileDocumentStore` actor 在非主上下文做 I/O；磁盘基线包含设备/inode、内容摘要和元数据，写入同目录独占临时文件、同步、提交前复查及原子替换。首次保存计划检查目标在图片迁移期间是否变更。
+- 保存基线核对创建时间、权限、所有者／组、标志、硬链接数、ACL与扩展属性。LaunchServices仅更新有效且前进的`com.apple.lastuseddate#PS`时可保留正常保存；该例外要求其他受检内容与元数据全部一致，不普遍忽略ctime或外部变更。读取遇到元数据竞争时最多完整重读三次，只有严格稳定的快照才用于比较；提交后读回目标，核对身份与字节，不确认时保留编辑。扩展属性最多256项、累计16MiB，超预算拒绝而非跳过检查。
 - macOS 文件协调不是对任意不配合外部写入的 CAS；最终核对和提交之间仍有边界，不得宣称消除所有外部竞争。提交后无法确认须保留编辑并拒绝自动关闭/重试。
 - `ImageStore` actor 管理 `<文档名>.assets` 和应用自身按会话/标签隔离的暂存；会话文件锁证实是否存活。只清理可证实失效的应用管理目录，正式 `.assets` 不自动删。
 - 暂存图迁移仅处理保存快照实际图片引用；Web 以语法节点更新目标，正文和当前编辑分别正常化，不全局字符串替换、不清空历史。

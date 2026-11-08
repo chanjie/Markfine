@@ -112,7 +112,14 @@ export class EditorApplication {
     value => { this.applyPreferences({ showAllFiles: value }); this.persistPreference('showAllFiles', value); }, () => { this.applyLayout(); this.renderChrome(); });
 
   constructor() {
-    preserveContextSelection();
+    preserveContextSelection(() => {
+      const item = this.active, editable = !!item && !this.reading && !item.unsupported && !item.imageLocked && !item.copyLocked && !item.closeLocked && !this.composing();
+      return [
+        { label: t('复制', 'Copy'), disabled: !editable, run: () => { void this.copyContent(); } },
+        { label: t('剪切', 'Cut'), disabled: !editable || !item || item.state.selection.main.empty, run: () => { void this.copyContent(undefined, true); } },
+        { label: t('粘贴', 'Paste'), disabled: !editable, run: () => { this.requestPaste(); } }
+      ];
+    });
     byID<HTMLInputElement>('show-workspace-recents').onchange = event => { const value = (event.target as HTMLInputElement).checked; this.applyPreferences({ showWorkspaceRecents: value }); this.persistPreference('showWorkspaceRecents', value); };
     byID('toggle-outline').onclick = () => this.toggleOutline();
     byID('hide-outline').onclick = () => this.toggleOutline();
@@ -320,6 +327,7 @@ export class EditorApplication {
       })
     ] });
     const saves = new SaveMachine(context, id, state.doc, transport);
+    saves.encoding = typeof message.encoding === 'string' ? message.encoding : 'UTF-8';
     saves.lineSeparator = separator;
     const item: EditorDocument = { id, title: String(message.title), path: String(message.path), state, saves, locks,
       imageLocked: false, closeLocked: false,copyLocked:false, numbers, sourceStyles, preview: message.preview === true, unsupported: message.unsupported === true, unsubscribe: () => {}, resume: message.resume as EditorDocument['resume'],

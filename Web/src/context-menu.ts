@@ -3,10 +3,16 @@ let dismissCurrent: (() => void) | undefined;
 export function dismissContextMenu(): void { dismissCurrent?.(); }
 export function isContextGesture(event: MouseEvent): boolean { return event.button === 2 || event.button === 0 && event.ctrlKey; }
 /** Stop WebKit/CodeMirror's right-click word selection before opening a menu. */
-export function preserveContextSelection(): void {
+export function preserveContextSelection(actions?: () => MenuAction[]): void {
   document.addEventListener('mousedown', event => {
     if (isContextGesture(event) && event.target instanceof Element && event.target.closest('#editor,#reader,.outline-row,.tab')) event.preventDefault();
   }, true);
+  document.addEventListener('contextmenu', event => {
+    if (event.defaultPrevented || !actions || !(event.target instanceof Element) || !event.target.closest('#editor') || event.target.closest('.live-table,.image-frame')) return;
+    // WebKit's native context menu selects the word under the pointer even when
+    // mousedown was cancelled. Use the same controlled menu as other editor objects.
+    event.preventDefault(); contextMenu(event.clientX, event.clientY, actions(), 'editor-context-menu');
+  });
 }
 export function contextMenu(x: number, y: number, actions: MenuAction[], className = ''): void {
   dismissContextMenu();

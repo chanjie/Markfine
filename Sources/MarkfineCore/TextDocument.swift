@@ -3,6 +3,9 @@ import Foundation
 /// File contents are data, never a program or a resource-loading document.
 public enum TextDocument {
     public static let maximumBytes = 16 * 1_048_576
+    // A valid 16 MiB UTF-16 file can expand to almost 24 MiB as bridge UTF-8.
+    // The store still enforces the original encoding's 16 MiB disk limit.
+    public static let maximumBridgeBytes = 24 * 1_048_576
     public static func isMarkdown(_ url: URL?) -> Bool { url == nil || ["md", "markdown"].contains(url!.pathExtension.lowercased()) }
     public static func language(_ url: URL?) -> String {
         guard let url else { return "" }
@@ -53,6 +56,13 @@ public struct TextFileEncoding: Equatable, Sendable {
     }
 
     public func encode(_ text: String) throws -> Data {
+        let format = String.Encoding(rawValue: encoding)
+        var bytes = bom.count
+        if format == .utf16LittleEndian || format == .utf16BigEndian {
+            for scalar in text.unicodeScalars { bytes += scalar.value > 0xffff ? 4 : 2; if bytes > TextDocument.maximumBytes { throw FileStoreFailure.tooLarge } }
+        } else if format == .utf32LittleEndian || format == .utf32BigEndian {
+            for _ in text.unicodeScalars { bytes += 4; if bytes > TextDocument.maximumBytes { throw FileStoreFailure.tooLarge } }
+        } else if text.utf8.count > TextDocument.maximumBytes - bom.count { throw FileStoreFailure.tooLarge }
         guard let data = text.data(using: String.Encoding(rawValue: encoding), allowLossyConversion: false) else { throw FileStoreFailure.invalidUTF8 }
         guard data.count <= TextDocument.maximumBytes - bom.count else { throw FileStoreFailure.tooLarge }
         return bom + data

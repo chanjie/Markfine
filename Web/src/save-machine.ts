@@ -2,6 +2,7 @@ import { Text } from '@codemirror/state';
 import { migrateImageReferences } from './migration';
 import { newID } from './protocol';
 import { t } from './localization';
+import { encodedTextBytes } from './text-document';
 
 export interface Context { protocolVersion: 1; sessionID: string; capability: string }
 export type Outcome = 'success' | 'failure' | 'cancelled' | 'conflict' | 'unconfirmed';
@@ -18,6 +19,7 @@ export class SaveMachine {
   state: SaveState = 'loaded';
   error = '';
   lineSeparator = '\n';
+  encoding = 'UTF-8';
   serialize?: (text: Text) => string;
   private currentLineEndings = '';
   private savedLineEndings = '';
@@ -42,7 +44,7 @@ export class SaveMachine {
     if (this.pending) { this.queued = true; this.changed(); return; }
     const requestID = this.makeID(), text = this.current, revision = this.revision;
     const snapshot = this.serialize ? this.serialize(text) : this.lineSeparator === '\n' ? text.toString() : text.toString().replace(/\n/g, this.lineSeparator);
-    if (new TextEncoder().encode(snapshot).length > 16 * 1_048_576) {
+    if (encodedTextBytes(snapshot, this.encoding) > 16 * 1_048_576) {
       this.state = 'failure'; this.error = t('文本超过 16 MiB 的保存上限，当前编辑已保留。', 'The text exceeds the 16 MiB save limit. Your edits are retained.'); this.changed(); return;
     }
     const timer = setTimeout(() => {

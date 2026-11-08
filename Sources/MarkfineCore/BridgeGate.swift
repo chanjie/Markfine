@@ -63,7 +63,7 @@ public struct BridgeGate {
                   value.doubleValue.rounded() == value.doubleValue else { throw BridgeFailure.malformed }
         }
         if kind == "save" {
-            guard let snapshot = object["snapshot"] as? String, snapshot.utf8.count <= TextDocument.maximumBytes else { throw BridgeFailure.malformed }
+            guard let snapshot = object["snapshot"] as? String, snapshot.utf8.count <= TextDocument.maximumBridgeBytes else { throw BridgeFailure.malformed }
         }
         if kind == "resolvePaste", !["retry", "local"].contains(object["action"] as? String ?? "") { throw BridgeFailure.malformed }
         func boolean(_ value: Any?) -> Bool {
