@@ -25,7 +25,7 @@ public struct BridgeGate {
         let common: Set<String> = ["protocolVersion", "sessionID", "capability", "kind"]
         let fields: Set<String>
         switch kind {
-        case "ready", "new", "open", "loadMermaid", "closeEmptyWindow", "zoomWindow": fields = []
+        case "ready", "new", "open", "loadMermaid", "closeEmptyWindow": fields = []
         case "workspaceChildren": fields = ["folderID", "generation", "showAll", "requestID"]
         case "workspaceMetadata": fields = ["entryIDs", "generation", "requestID"]
         case "openWorkspaceEntry": fields = ["entryID", "generation", "requestID"]
@@ -36,13 +36,17 @@ public struct BridgeGate {
         case "openUnsupported": fields = ["documentID"]
         case "readingMode": fields = ["enabled"]
         case "setPreference": fields = ["key", "value"]
-        case "openLink": fields = ["documentID", "href"]
+        case "openLink": fields = ["documentID", "href", "requestID"]
         case "state": fields = ["documentID", "revision", "dirty", "pending"]
         case "activeDocument": fields = ["documentID"]
         case "save": fields = ["documentID", "requestID", "revision", "snapshot"]
         case "closeDocument": fields = ["documentID", "requestID", "revision"]
         case "closeAllResult": fields = ["requestID", "permitted", "documents"]
         case "paste": fields = ["documentID", "requestID", "revision", "anchor", "head"]
+        case "resolvePaste": fields = ["documentID", "requestID", "action"]
+        case "beginCopy": fields = ["documentID", "requestID"]
+        case "abortCopy": fields = ["documentID", "ticket"]
+        case "copyFragment": fields = ["documentID", "requestID", "ticket", "revision", "markdown", "snapshot", "raw"]
         case "cancelPaste": fields = ["documentID", "requestID"]
         default: throw BridgeFailure.malformed
         }
@@ -50,21 +54,32 @@ public struct BridgeGate {
         if fields.contains("documentID") {
             guard let id = object["documentID"] as? String, documentIDs.contains(id) else { throw BridgeFailure.unauthorized }
         }
-        if fields.contains("requestID") {
-            guard let id = object["requestID"] as? String, UUID(uuidString: id) != nil else { throw BridgeFailure.malformed }
+        for name in ["requestID", "ticket"] where fields.contains(name) {
+            guard let id = object[name] as? String, UUID(uuidString: id) != nil else { throw BridgeFailure.malformed }
         }
         for name in ["revision", "anchor", "head"] where fields.contains(name) {
             guard let value = object[name] as? NSNumber, CFGetTypeID(value) != CFBooleanGetTypeID(),
                   value.doubleValue >= 0, value.doubleValue <= 9_007_199_254_740_991,
                   value.doubleValue.rounded() == value.doubleValue else { throw BridgeFailure.malformed }
         }
-        if kind == "save", !(object["snapshot"] is String) { throw BridgeFailure.malformed }
+        if kind == "save" {
+            guard let snapshot = object["snapshot"] as? String, snapshot.utf8.count <= TextDocument.maximumBytes else { throw BridgeFailure.malformed }
+        }
+        if kind == "resolvePaste", !["retry", "local"].contains(object["action"] as? String ?? "") { throw BridgeFailure.malformed }
         func boolean(_ value: Any?) -> Bool {
             guard let number = value as? NSNumber else { return false }
             return CFGetTypeID(number) == CFBooleanGetTypeID()
         }
         if kind == "state", !(boolean(object["dirty"]) && boolean(object["pending"])) { throw BridgeFailure.malformed }
         if kind == "readingMode", !boolean(object["enabled"]) { throw BridgeFailure.malformed }
+        if kind == "copyFragment" {
+            guard boolean(object["raw"]), let markdown = object["markdown"] as? String, markdown.utf8.count <= 8 * 1_048_576,
+                  let snapshot = object["snapshot"] as? [String: Any], Set(snapshot.keys) == ["html", "resources", "imageBindings"],
+                  let html = snapshot["html"] as? String, html.utf8.count <= 32 * 1_048_576,
+                  let resources = snapshot["resources"] as? [String], resources.count <= 512, resources.allSatisfy({ $0.utf8.count <= 12_000 }),
+                  let bindings = snapshot["imageBindings"] as? [[String: String]], bindings.count <= 512,
+                  bindings.allSatisfy({ Set($0.keys) == ["source", "resource"] && $0.values.allSatisfy({ $0.utf8.count <= 12_000 }) }) else { throw BridgeFailure.malformed }
+        }
         if kind == "exportDocument", !boolean(object["printing"]) { throw BridgeFailure.malformed }
         if kind == "exportDocument", !["edit", "source", "read"].contains(object["mode"] as? String ?? "") { throw BridgeFailure.malformed }
         if kind == "diagnostic", !["globalError", "unhandledRejection", "editorException", "renderFailure", "imageFailure", "diagramFailure", "blockedNetwork"].contains(object["event"] as? String ?? "") { throw BridgeFailure.malformed }

@@ -7,7 +7,7 @@ export interface Context { protocolVersion: 1; sessionID: string; capability: st
 export type Outcome = 'success' | 'failure' | 'cancelled' | 'conflict' | 'unconfirmed';
 export type SaveState = 'loaded' | 'saving' | 'saved' | 'failure' | 'cancelled' | 'conflict' | 'unconfirmed';
 export type Transport = (body: Record<string, unknown>) => void;
-interface Pending { requestID: string; revision: number; text: Text; timer: ReturnType<typeof setTimeout> }
+interface Pending { requestID: string; revision: number; text: Text; lineEndings: string; timer: ReturnType<typeof setTimeout> }
 
 export class SaveMachine {
   current: Text;
@@ -18,31 +18,40 @@ export class SaveMachine {
   state: SaveState = 'loaded';
   error = '';
   lineSeparator = '\n';
+  serialize?: (text: Text) => string;
+  private currentLineEndings = '';
+  private savedLineEndings = '';
   private listeners = new Set<() => void>();
 
   constructor(readonly context: Context, readonly documentID: string, initial: Text, private readonly send: Transport,
     private readonly timeoutMS = 60_000, private readonly makeID = newID) { this.current = this.baseline = initial; }
-  get dirty(): boolean { return !this.current.eq(this.baseline); }
+  get dirty(): boolean { return this.currentLineEndings !== this.savedLineEndings || !this.current.eq(this.baseline); }
+  get lineEndingKey(): string { return this.currentLineEndings; }
+  initializeLineEndings(key: string): void { this.currentLineEndings = this.savedLineEndings = key; }
   subscribe(listener: () => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   private fields() { const { protocolVersion, sessionID, capability } = this.context; return { protocolVersion, sessionID, capability }; }
   private changed(): void {
     this.send({ ...this.fields(), kind: 'state', documentID: this.documentID, revision: this.revision, dirty: this.dirty, pending: this.pending !== null });
     for (const listener of this.listeners) listener();
   }
-  edited(text: Text): void {
-    if (text === this.current || text.eq(this.current)) return;
-    this.current = text; this.revision++; this.changed();
+  edited(text: Text, lineEndings = this.currentLineEndings): void {
+    if ((text === this.current || text.eq(this.current)) && lineEndings === this.currentLineEndings) return;
+    this.current = text; this.currentLineEndings = lineEndings; this.revision++; this.changed();
   }
   requestSave(): void {
     if (this.pending) { this.queued = true; this.changed(); return; }
     const requestID = this.makeID(), text = this.current, revision = this.revision;
+    const snapshot = this.serialize ? this.serialize(text) : this.lineSeparator === '\n' ? text.toString() : text.toString().replace(/\n/g, this.lineSeparator);
+    if (new TextEncoder().encode(snapshot).length > 16 * 1_048_576) {
+      this.state = 'failure'; this.error = t('文本超过 16 MiB 的保存上限，当前编辑已保留。', 'The text exceeds the 16 MiB save limit. Your edits are retained.'); this.changed(); return;
+    }
     const timer = setTimeout(() => {
       if (this.pending?.requestID !== requestID) return;
       this.state = 'unconfirmed'; this.error = t('保存结果未确认，请保留文档，不要强制关闭', 'Save unconfirmed. Keep the document open; do not force quit'); this.changed();
     }, this.timeoutMS);
-    this.pending = { requestID, revision, text, timer }; this.state = 'saving'; this.error = ''; this.changed();
+    this.pending = { requestID, revision, text, lineEndings: this.currentLineEndings, timer }; this.state = 'saving'; this.error = ''; this.changed();
     this.send({ ...this.fields(), kind: 'save', documentID: this.documentID, requestID, revision,
-      snapshot: this.lineSeparator === '\n' ? text.toString() : text.toString().replace(/\n/g, this.lineSeparator) });
+      snapshot });
   }
   accepts(value: Record<string, unknown>): boolean {
     const pending = this.pending;
@@ -60,6 +69,7 @@ export class SaveMachine {
     if (value.outcome === 'success') {
       const mapping = (value.migration ?? {}) as Record<string, string>;
       this.baseline = Text.of(migrateImageReferences(pending.text.toString(), mapping).split('\n'));
+      this.savedLineEndings = pending.lineEndings;
     }
     const drain = this.queued && value.outcome === 'success' && this.dirty;
     this.queued = false;
@@ -83,16 +93,17 @@ export async function protectClose(machine: SaveMachine, choose: () => Promise<'
   if (machine.pending) return false;
   if (!machine.dirty) return true;
   const atDecision = machine.current;
+  const endingsAtDecision = machine.lineEndingKey;
   const decision = await choose();
   if (decision === 'cancel' || machine.pending) return false;
-  if (decision === 'discard') return machine.current.eq(atDecision);
+  if (decision === 'discard') return machine.current.eq(atDecision) && machine.lineEndingKey === endingsAtDecision;
   return machine.saveForClose();
 }
 export async function protectCloseAll(machines: SaveMachine[], choose: (machine: SaveMachine) => Promise<'save' | 'discard' | 'cancel'>): Promise<boolean> {
-  const approved: { machine: SaveMachine; text: Text }[] = [];
+  const approved: { machine: SaveMachine; text: Text; endings: string }[] = [];
   for (const machine of machines) {
     if (!await protectClose(machine, () => choose(machine))) return false;
-    approved.push({ machine, text: machine.current });
+    approved.push({ machine, text: machine.current, endings: machine.lineEndingKey });
   }
-  return approved.every(({ machine, text }) => !machine.pending && machine.current.eq(text));
+  return approved.every(({ machine, text, endings }) => !machine.pending && machine.current.eq(text) && machine.lineEndingKey === endings);
 }

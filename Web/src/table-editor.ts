@@ -4,9 +4,17 @@ import { EditorView, WidgetType, keymap } from '@codemirror/view';
 import { editorMarkdown } from './editor-language';
 import { cellInlinePresentation } from './inline-presentation';
 import { t } from './localization';
+import { pairedPunctuation } from './paired-punctuation';
 
 export interface TableCell { from: number; to: number; text: string }
 export interface TableRow { cells: TableCell[]; header: boolean }
+export interface TableCopy { markdown:string;from:number;to:number;syntheticHeader:boolean;clear:{from:number;to:number;insert:string}[] }
+export function tableSelectionMarkdown(rows:readonly TableRow[],r1:number,c1:number,r2:number,c2:number,alignment:readonly string[]=[]):string {
+  const top=Math.min(r1,r2),bottom=Math.max(r1,r2),left=Math.min(c1,c2),right=Math.max(c1,c2);
+  const values=rows.slice(top,bottom+1).map(row=>Array.from({length:right-left+1},(_,i)=>row.cells[left+i]?.text??''));
+  if(!values.length)return '';if(top>0)values.unshift(Array(right-left+1).fill(''));
+  return [values[0],Array.from({length:right-left+1},(_,i)=>alignment[left+i]??'---'),...values.slice(1)].map(row=>'| '+row.join(' | ')+' |').join('\n');
+}
 function containerPrefix(line: string): string { return /^(?:[ \t]*>[ \t]?)+[ \t]*/.exec(line)?.[0] ?? /^[ \t]+/.exec(line)?.[0] ?? ''; }
 /** Split only unescaped pipes; retain exact UTF-16 source spans and original padding. */
 export function tableRows(source: string, base: number): TableRow[] {
@@ -61,6 +69,9 @@ export function tableTransaction(source: string, from: number, row: number, colu
   return { changes: { from, to: from + source.length, insert }, selection: EditorSelection.cursor(target), userEvent: 'input.table' };
 }
 const controllers = new WeakMap<HTMLElement, TableController>();
+export function tableCopySelection(view:EditorView):TableCopy|undefined { for(const element of view.dom.querySelectorAll<HTMLElement>('.live-table')){const value=controllers.get(element)?.copySelection();if(value)return value;} }
+export function tableHasRange(view:EditorView):boolean{for(const element of view.dom.querySelectorAll<HTMLElement>('.live-table'))if(controllers.get(element)?.hasRange)return true;return false;}
+export function tableCellSelection(view:EditorView):{from:number;to:number;selected:boolean}|undefined{for(const element of view.dom.querySelectorAll<HTMLElement>('.live-table')){const value=controllers.get(element)?.textSelection();if(value)return value;}}
 export function tableHasFocus(view: EditorView): boolean { return !!view.dom.querySelector('.table-cell-editor.cm-focused'); }
 export function deleteTableCell(view: EditorView): boolean {
   for (const element of view.dom.querySelectorAll<HTMLElement>('.live-table')) if (controllers.get(element)?.deleteFocusedCell()) return true;
@@ -96,6 +107,8 @@ export function navigateTable(view: EditorView, direction: 'left' | 'right' | 'u
 class TableController {
   rows: TableRow[] = []; views: EditorView[] = []; syncing = false;
   private source = ''; private from = 0; private menu?: HTMLElement; private menuEvents?: AbortController; private dialog?: HTMLDialogElement;
+  private menuFocus?: HTMLElement;
+  private selection?: {r1:number;c1:number;r2:number;c2:number}; private drag?:{r:number;c:number}; private lastCell?:{r:number;c:number}; private selectionEvents=new AbortController();
   constructor(readonly parent: EditorView, readonly element: HTMLElement, source: string, from: number) {
     element.addEventListener('focusin', () => element.classList.add('table-active'));
     element.addEventListener('focusout', () => queueMicrotask(() => {
@@ -103,7 +116,35 @@ class TableController {
       element.classList.toggle('table-active', element.contains(document.activeElement) || this.parent.contentDOM === document.activeElement && head >= this.from && head <= this.from + this.source.length);
     }));
     element.addEventListener('contextmenu', event => this.contextMenu(event));
+    element.addEventListener('pointerdown',event=>{
+      if(event.button!==0||event.ctrlKey||this.composing)return;const cell=(event.target as Element).closest<HTMLElement>('td,th');if(!cell)return;
+      const r=Number(cell.dataset.row),c=Number(cell.dataset.column),anchor=this.selection?{r:this.selection.r1,c:this.selection.c1}:this.lastCell;
+      if(event.shiftKey&&anchor&&(anchor.r!==r||anchor.c!==c)){event.preventDefault();event.stopPropagation();this.selection={r1:anchor.r,c1:anchor.c,r2:r,c2:c};this.paintSelection();this.focusRange();}
+      else{this.selection=undefined;this.paintSelection();this.drag={r,c};this.lastCell={r,c};}
+    },true);
+    document.addEventListener('pointermove',event=>{
+      if(!this.drag||!event.buttons||this.composing)return;
+      const cell=document.elementFromPoint(event.clientX,event.clientY)?.closest<HTMLElement>('td,th');if(!cell||!this.element.contains(cell))return;
+      const r=Number(cell.dataset.row),c=Number(cell.dataset.column);
+      if(this.selection||r!==this.drag.r||c!==this.drag.c){event.preventDefault();this.selection={r1:this.drag.r,c1:this.drag.c,r2:r,c2:c};getSelection()?.removeAllRanges();this.paintSelection();this.focusRange();}
+    },{signal:this.selectionEvents.signal});
+    document.addEventListener('pointerup',()=>{this.drag=undefined;},{signal:this.selectionEvents.signal});
+    document.addEventListener('pointerdown',event=>{if(event.button===0&&!event.ctrlKey&&!this.element.contains(event.target as Node)&&!(event.target as Element)?.closest?.('.table-menu')){this.selection=undefined;this.paintSelection();}},{capture:true,signal:this.selectionEvents.signal});
     this.sync(source, from);
+  }
+  private paintSelection(){const s=this.selection;this.element.classList.toggle('selecting-cells',!!s);for(const cell of this.element.querySelectorAll<HTMLElement>('td,th')){const r=Number(cell.dataset.row),c=Number(cell.dataset.column);cell.classList.toggle('selected-cell',!!s&&r>=Math.min(s.r1,s.r2)&&r<=Math.max(s.r1,s.r2)&&c>=Math.min(s.c1,s.c2)&&c<=Math.max(s.c1,s.c2));}}
+  copySelection():TableCopy|undefined {
+    const s=this.selection;if(!s)return;const cells=this.rows.slice(Math.min(s.r1,s.r2),Math.max(s.r1,s.r2)+1).flatMap(row=>row.cells.slice(Math.min(s.c1,s.c2),Math.max(s.c1,s.c2)+1));
+    const alignment=(this.source.split('\n')[1]??'').split('|').map(v=>v.trim()).filter(v=>/^:?-+:?$/.test(v));
+    return {markdown:tableSelectionMarkdown(this.rows,s.r1,s.c1,s.r2,s.c2,alignment),from:this.from,to:this.end,syntheticHeader:Math.min(s.r1,s.r2)>0,clear:cells.map(cell=>({from:cell.from,to:cell.to,insert:''}))};
+  }
+  get hasRange():boolean{return !!this.selection;}
+  private focusRange(){const s=this.selection;if(!s)return;const first=this.rows[Math.min(s.r1,s.r2)]?.cells[Math.min(s.c1,s.c2)];if(first)this.parent.dispatch({selection:EditorSelection.cursor(first.from)});this.parent.focus();}
+  textSelection():{from:number;to:number;selected:boolean}|undefined{
+    const cells=this.rows.flatMap(row=>row.cells),index=this.views.findIndex(child=>child.dom.contains(document.activeElement));
+    if(index>=0){const cell=cells[index],selection=this.views[index].state.selection.main;return selection.empty?{from:cell.from,to:cell.to,selected:false}:{from:cell.from+selection.from,to:cell.from+selection.to,selected:true};}
+    const selection=this.parent.state.selection.main,cell=cells.find(cell=>selection.from>=cell.from&&selection.to<=cell.to);
+    return cell?(selection.empty?{from:cell.from,to:cell.to,selected:false}:{from:selection.from,to:selection.to,selected:true}):undefined;
   }
   get composing(): boolean { return this.views.some(view => view.composing); }
   get start(): number { return this.from; }
@@ -116,6 +157,7 @@ class TableController {
     queueMicrotask(() => this.focusSelection()); return true;
   }
   sync(source: string, from: number) {
+    if(source!==this.source)this.selection=undefined;
     this.source = source; this.from = from;
     const head = this.parent.state.selection.main.head;
     this.element.classList.toggle('table-active', head >= from && head <= from + source.length);
@@ -133,7 +175,7 @@ class TableController {
         for (const cell of row.cells) {
           const td = document.createElement(row.header ? 'th' : 'td'); td.dataset.row = String(rows.indexOf(row)); td.dataset.column = String(row.cells.indexOf(cell)); tr.append(td);
           const index = this.views.length;
-          const view = new EditorView({ parent: td, state: EditorState.create({ doc: cell.text, extensions: [editorMarkdown(), cellInlinePresentation(), EditorView.lineWrapping,
+          const view = new EditorView({ parent: td, state: EditorState.create({ doc: cell.text, extensions: [editorMarkdown(), cellInlinePresentation(), EditorView.lineWrapping, pairedPunctuation(),
             EditorView.editorAttributes.of({ class: 'table-cell-editor' }), EditorView.contentAttributes.of({ 'aria-label': row.header ? t('表头单元格', 'Table header cell') : t('表格单元格', 'Table cell') }),
             EditorState.transactionFilter.of(transaction => transaction.docChanged && (this.parent.state.readOnly || /[\r\n]/.test(transaction.newDoc.toString())) ? [] : transaction),
               keymap.of([{ key: 'Tab', run: () => this.move(index, 1) }, { key: 'Shift-Tab', run: () => this.move(index, -1) },
@@ -142,14 +184,14 @@ class TableController {
               { key: 'Enter', run: () => this.move(index, row.cells.length) }, { key: 'Escape', run: () => { this.parent.focus(); return true; } },
               ...defaultKeymap]),
             EditorView.updateListener.of(update => {
-              if (this.syncing || (!update.docChanged && !update.selectionSet && !update.focusChanged)) return;
+              if (this.syncing || this.selection&&!update.docChanged || (!update.docChanged && !update.selectionSet && !update.focusChanged)) return;
               if (update.focusChanged && !update.view.hasFocus) return;
               const cell = this.rows.flatMap(row => row.cells)[index]; if (!cell) return;
               const spec: TransactionSpec = { selection: EditorSelection.single(cell.from + update.state.selection.main.anchor, cell.from + update.state.selection.main.head) };
               if (update.docChanged) { spec.changes = { from: cell.from, to: cell.to, insert: update.state.doc.toString().replace(/(?<!\\)\|/g, '\\|') }; spec.userEvent = 'input.type'; }
               // A child update cannot dispatch into its parent synchronously during the parent's DOM update.
               queueMicrotask(() => { if (this.element.isConnected && !this.parent.state.readOnly) this.parent.dispatch(spec); });
-            }), EditorView.domEventHandlers({ paste: event => {
+            }), EditorView.domEventHandlers({copy:event=>{event.preventDefault();this.parent.dom.dispatchEvent(new CustomEvent('table-copy-request',{bubbles:true,detail:{cut:false}}));return true;},cut:event=>{event.preventDefault();this.parent.dom.dispatchEvent(new CustomEvent('table-copy-request',{bubbles:true,detail:{cut:true}}));return true;},paste: event => {
               event.preventDefault(); this.parent.dom.dispatchEvent(new CustomEvent('table-paste', { bubbles: true })); return true;
             } })
           ] }) });
@@ -166,6 +208,7 @@ class TableController {
         view.contentDOM.contentEditable = String(!this.parent.state.readOnly);
       });
     } finally { this.syncing = false; }
+    this.paintSelection();
   }
   focusSelection(): boolean {
     const position = this.parent.state.selection.main.head, cells = this.rows.flatMap(row => row.cells);
@@ -219,13 +262,17 @@ class TableController {
     this.dismissMenu(); this.parent.dispatch({ ...spec, annotations: isolateHistory.of('full') });
     if (action === 'deleteTable') this.parent.focus(); else queueMicrotask(() => { if (!focusTableSelection(this.parent)) this.parent.focus(); });
   }
-  private dismissMenu(): void { this.menuEvents?.abort(); this.menu?.remove(); this.menu = undefined; }
+  private dismissMenu(): void { const focused=this.menu?.contains(document.activeElement);this.menuEvents?.abort();this.menu?.remove();this.menu=undefined;if(focused&&this.menuFocus?.isConnected)this.menuFocus.focus({preventScroll:true});this.menuFocus=undefined; }
   private contextMenu(event: MouseEvent): void {
     if (this.parent.state.readOnly || this.composing) return;
     const cell = (event.target as Element).closest<HTMLElement>('td,th'); if (!cell) return;
     event.preventDefault(); this.dismissMenu();
+    this.menuFocus = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
     const row = Number(cell.dataset.row), column = Number(cell.dataset.column);
     const menu = document.createElement('div'); menu.className = 'table-menu'; menu.setAttribute('role', 'menu'); this.menu = menu;
+    const copySource=document.createElement('button');copySource.type='button';copySource.textContent=t('复制表格源码','Copy table Markdown');copySource.setAttribute('role','menuitem');copySource.dataset.action='copySource';
+    copySource.onclick=()=>{const source=this.source;this.dismissMenu();this.parent.dom.dispatchEvent(new CustomEvent('table-copy',{bubbles:true,detail:{markdown:source,raw:true}}));};menu.append(copySource);
+    if(this.selection){const copy=document.createElement('button');copy.type='button';copy.textContent=t('复制选中单元格','Copy selected cells');copy.setAttribute('role','menuitem');copy.onclick=()=>{const selected=this.copySelection();this.dismissMenu();if(selected)this.parent.dom.dispatchEvent(new CustomEvent('table-copy',{bubbles:true,detail:{markdown:selected.markdown,raw:false}}));};menu.append(copy);}
     const choices: [string, string, TableAction, boolean?][] = [
       ['在上方插入一行', 'Insert row above', 'rowBefore'], ['在下方插入一行', 'Insert row below', 'rowAfter'],
       ['在上方插入多行…', 'Insert rows above…', 'rowBefore', true], ['在下方插入多行…', 'Insert rows below…', 'rowAfter', true],
@@ -244,13 +291,13 @@ class TableController {
     this.menuEvents = new AbortController();
     document.addEventListener('pointerdown', event => { if (!menu.contains(event.target as Node)) this.dismissMenu(); }, { capture: true, signal: this.menuEvents.signal });
     menu.onkeydown = event => {
-      if (event.key === 'Escape') { this.dismissMenu(); this.parent.focus(); }
+      if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); this.dismissMenu(); }
       if (['ArrowDown', 'ArrowUp'].includes(event.key)) {
         event.preventDefault(); const buttons = [...menu.querySelectorAll('button')], index = buttons.indexOf(document.activeElement as HTMLButtonElement);
-        buttons[(index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length].focus();
+        buttons[(index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length].focus({ preventScroll: true });
       }
     };
-    menu.querySelector('button')?.focus();
+    menu.querySelector('button')?.focus({ preventScroll: true });
   }
   private askCount(action: TableAction, row: number, column: number): void {
     this.dismissMenu(); this.dialog?.remove();
@@ -268,7 +315,7 @@ class TableController {
     const actions = document.createElement('div'); actions.className = 'dialog-actions'; actions.append(cancel, submit);
     form.append(title, label, actions); dialog.append(form); document.body.append(dialog); dialog.showModal(); input.focus(); input.select();
   }
-  destroy() { this.dismissMenu(); this.dialog?.remove(); this.views.forEach(view => view.destroy()); }
+  destroy() { this.selectionEvents.abort();this.dismissMenu(); this.dialog?.remove(); this.views.forEach(view => view.destroy()); }
 }
 export class TableWidget extends WidgetType {
   private readonly locale = t('zh', 'en');

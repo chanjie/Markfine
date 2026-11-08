@@ -1,6 +1,12 @@
 import { EditorSelection, type EditorState, type TransactionSpec } from '@codemirror/state';
 import { t } from './localization';
 
+export function physicalFormatShortcut(event: Pick<KeyboardEvent, 'code' | 'ctrlKey' | 'shiftKey' | 'metaKey' | 'altKey' | 'isComposing'>): string | null {
+  // Pinyin keyboards can report “·” or “～” for this physical key. Do not bind a
+  // text character or steal any composing, plain punctuation or other modifier chord.
+  return event.code === 'Backquote' && event.ctrlKey && event.shiftKey && !event.metaKey && !event.altKey && !event.isComposing ? 'strike' : null;
+}
+
 export function formatTransaction(state: EditorState, action: string): TransactionSpec | null {
   const selection = state.selection.main;
   const { from, to } = selection;

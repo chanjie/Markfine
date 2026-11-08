@@ -5,7 +5,7 @@ public struct FileIdentity: Equatable, Sendable {
     public let device: UInt64
     public let inode: UInt64
 
-    fileprivate init(_ info: stat) {
+    init(_ info: stat) {
         device = UInt64(truncatingIfNeeded: info.st_dev)
         inode = UInt64(info.st_ino)
     }
@@ -17,6 +17,9 @@ public struct FileDocumentMetadata: Equatable, Sendable {
     public let url: URL?
     public let identity: FileIdentity?
     public let saveUnconfirmed: Bool
+    public let encoding: String
+    public var isMarkdown: Bool { TextDocument.isMarkdown(url) }
+    public var language: String { isMarkdown ? "" : TextDocument.language(url) }
 }
 
 public struct FileDocumentLoad: Sendable {
@@ -63,7 +66,7 @@ fileprivate struct FirstTargetObservation: Sendable {
 public enum FileStoreFailure: Error, Equatable, CustomStringConvertible {
     case unknownDocument, invalidRequest, duplicateRequest, staleRevision
     case targetRequired, replacementConfirmationRequired, targetAlreadyOpen, saveAsNotSupported
-    case invalidURL, notRegularFile, invalidUTF8, externalChange, commitUnconfirmed
+    case invalidURL, notRegularFile, invalidUTF8, notText, tooLarge, externalChange, commitUnconfirmed
     case posix(operation: String, code: Int32)
 
     public var description: String {
@@ -78,7 +81,9 @@ public enum FileStoreFailure: Error, Equatable, CustomStringConvertible {
         case .saveAsNotSupported: return "当前版本不提供另存为"
         case .invalidURL: return "无效文件位置"
         case .notRegularFile: return "只能打开或保存普通文件"
-        case .invalidUTF8: return "文档不是有效 UTF-8，未替换或丢弃原始字节"
+        case .invalidUTF8: return "无法无损识别文档的 Unicode 编码，原始字节未改变"
+        case .notText: return "文件不是可识别的纯文本，未读取为可编辑文档"
+        case .tooLarge: return "文件超过 16 MiB 的文本编辑上限，未截断或修改内容"
         case .externalChange: return "原文件已被外部更改、删除或移走；已停止保存并保留编辑"
         case .commitUnconfirmed: return "保存可能已提交但结果未确认；保留编辑，不自动重试或关闭"
         case .posix(let operation, let code): return "文件操作失败（\(operation)，\(code)）"
@@ -95,10 +100,11 @@ public actor FileDocumentStore {
         var baseline: DiskStamp?
         var latestRevision = 0
         var unconfirmed = false
+        var encoding = TextFileEncoding.utf8
 
         var metadata: FileDocumentMetadata {
             FileDocumentMetadata(id: id, title: url?.lastPathComponent ?? "未命名", url: url,
-                                 identity: baseline?.file, saveUnconfirmed: unconfirmed)
+                                 identity: baseline?.file, saveUnconfirmed: unconfirmed, encoding: encoding.name)
         }
     }
     private var records: [String: Record] = [:]
@@ -135,7 +141,7 @@ public actor FileDocumentStore {
                                observation: FirstTargetObservation(stamp: file?.stamp, parent: directory.identity))
     }
 
-    public func open(_ selectedURL: URL) throws -> FileDocumentLoad {
+    public func open(_ selectedURL: URL, expectedIdentity: FileIdentity? = nil) throws -> FileDocumentLoad {
         let url = try Self.canonical(selectedURL)
         // An externally replaced/missing path still belongs to its open editor. Never reload it.
         if let existing = records.values.first(where: { $0.url == url }) {
@@ -144,20 +150,20 @@ public actor FileDocumentStore {
         // NSFileCoordinator itself performs a blocking open before its accessor. Reject special
         // files BEFORE coordination; O_NONBLOCK only inside the accessor is too late for FIFOs.
         try Self.preflightRegular(url, allowMissing: false)
-        let loaded: (DiskStamp, String) = try Self.coordinatedRead(url) { coordinated in
+        let loaded: (DiskStamp, String, TextFileEncoding) = try Self.coordinatedRead(url) { coordinated in
             guard coordinated == url else { throw FileStoreFailure.externalChange }
             let directory = try PinnedDirectory(url.deletingLastPathComponent())
-            guard let file = try ReadFile(directory: directory, name: url.lastPathComponent, allowMissing: false) else {
+            guard let file = try ReadFile(directory: directory, name: url.lastPathComponent, allowMissing: false, expectedIdentity: expectedIdentity) else {
                 throw FileStoreFailure.externalChange
             }
-            guard let markdown = String(data: file.data, encoding: .utf8) else { throw FileStoreFailure.invalidUTF8 }
+            let (markdown, encoding) = try TextFileEncoding.decode(file.data)
             try directory.verifyLocation()
-            return (file.stamp, markdown)
+            return (file.stamp, markdown, encoding)
         }
         if let existing = records.values.first(where: { $0.baseline?.file == loaded.0.file }) {
             return FileDocumentLoad(document: existing.metadata, markdown: nil)
         }
-        let record = Record(id: UUID().uuidString, url: url, baseline: loaded.0)
+        let record = Record(id: UUID().uuidString, url: url, baseline: loaded.0, encoding: loaded.2)
         records[record.id] = record
         return FileDocumentLoad(document: record.metadata, markdown: loaded.1)
     }
@@ -206,7 +212,7 @@ public actor FileDocumentStore {
                 if let original, self.records.values.contains(where: { $0.id != record.id && $0.baseline?.file == original.stamp.file }) {
                     throw FileStoreFailure.targetAlreadyOpen
                 }
-                return try self.write(Data(request.snapshot.utf8), to: url, directory: directory, original: original)
+                return try self.write(record.encoding.encode(request.snapshot), to: url, directory: directory, original: original)
             }
             record.url = url
             record.baseline = stamp
@@ -392,7 +398,7 @@ private struct ReadFile {
     let data: Data
     let stamp: DiskStamp
 
-    init?(directory: PinnedDirectory, name: String, allowMissing: Bool) throws {
+    init?(directory: PinnedDirectory, name: String, allowMissing: Bool, expectedIdentity: FileIdentity? = nil) throws {
         let raw = openat(directory.fd.value, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         if raw < 0 && errno == ENOENT && allowMissing { return nil }
         guard raw >= 0 else { throw FileDocumentStore.io("open file") }
@@ -400,6 +406,8 @@ private struct ReadFile {
         var before = stat()
         guard fstat(raw, &before) == 0 else { throw FileDocumentStore.io("stat file") }
         guard before.st_mode & S_IFMT == S_IFREG, before.st_size >= 0 else { throw FileStoreFailure.notRegularFile }
+        if let expectedIdentity, FileIdentity(before) != expectedIdentity { throw FileStoreFailure.externalChange }
+        guard before.st_size <= TextDocument.maximumBytes else { throw FileStoreFailure.tooLarge }
         var data = Data()
         var bytes = [UInt8](repeating: 0, count: 65_536)
         while true {

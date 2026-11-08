@@ -6,6 +6,7 @@ export class DiagramViewer {
   private svg?: SVGElement;
   private scale = 1;
   private baseWidth = 800;
+  private baseHeight = 600;
   private percent: HTMLButtonElement;
   constructor() {
     this.dialog = document.createElement('dialog'); this.dialog.id = 'diagram-viewer'; this.dialog.className = 'diagram-viewer';
@@ -23,24 +24,31 @@ export class DiagramViewer {
     this.canvas.onpointerdown = event => { if (event.button !== 0) return; drag = { x: event.clientX, y: event.clientY, left: this.canvas.scrollLeft, top: this.canvas.scrollTop }; this.canvas.setPointerCapture(event.pointerId); this.canvas.classList.add('dragging'); };
     this.canvas.onpointermove = event => { if (drag) this.canvas.scrollTo(drag.left - event.clientX + drag.x, drag.top - event.clientY + drag.y); };
     this.canvas.onpointerup = this.canvas.onpointercancel = () => { drag = undefined; this.canvas.classList.remove('dragging'); };
-    this.dialog.onclose = () => { this.stage.replaceChildren(); this.svg = undefined; };
+    this.dialog.onclose = () => { if (!this.dialog.open) { this.stage.replaceChildren(); this.svg = undefined; } };
     this.dialog.onkeydown = event => { if (event.key === '+' || event.key === '=') { event.preventDefault(); this.zoom(1.15); } else if (event.key === '-') { event.preventDefault(); this.zoom(1 / 1.15); } };
   }
   get open(): boolean { return this.dialog.open; }
   show(svg: SVGElement): void {
     this.svg = svg.cloneNode(true) as SVGElement; this.svg.style.removeProperty('min-width'); this.svg.style.removeProperty('max-width');
     this.baseWidth = Number(svg.getAttribute('viewBox')?.split(/[ ,]+/)[2]) || 800;
+    this.baseHeight = Number(svg.getAttribute('viewBox')?.split(/[ ,]+/)[3]) || 600;
     this.stage.replaceChildren(this.svg); this.dialog.querySelector('.diagram-viewer-title')!.textContent = t('流程图 · 拖动平移，⌘滚轮或捏合缩放', 'Diagram · Drag to pan, ⌘wheel or pinch to zoom');
     this.dialog.setAttribute('aria-label', t('图表放大查看', 'Diagram viewer')); (this.dialog.querySelector('.diagram-fit') as HTMLElement).title = t('适应窗口', 'Fit to window');
     this.dialog.querySelector('.diagram-close')!.setAttribute('aria-label', t('关闭图表', 'Close diagram'));
     if (!this.dialog.open) this.dialog.showModal(); this.fit(); this.canvas.focus();
   }
   zoom(factor: number): void { this.setScale(this.scale * factor); }
-  private fit(): void { this.setScale(Math.min(1, (this.canvas.clientWidth - 80) / this.baseWidth)); this.canvas.scrollTo(0, 0); }
+  private fit(): void { this.setScale(Math.min(1, (this.canvas.clientWidth - 80) / this.baseWidth, (this.canvas.clientHeight - 80) / this.baseHeight)); this.canvas.scrollTo(0, 0); }
   private setScale(scale: number): void {
-    const x = (this.canvas.scrollLeft + this.canvas.clientWidth / 2) / this.scale, y = (this.canvas.scrollTop + this.canvas.clientHeight / 2) / this.scale;
-    this.scale = Math.max(.2, Math.min(5, scale)); if (this.svg) { this.svg.style.width = `${this.baseWidth * this.scale}px`; this.svg.style.height = 'auto'; }
-    this.canvas.scrollTo(x * this.scale - this.canvas.clientWidth / 2, y * this.scale - this.canvas.clientHeight / 2);
+    const port = this.canvas.getBoundingClientRect(), before = this.svg?.getBoundingClientRect();
+    const centerX = port.left + this.canvas.clientWidth / 2, centerY = port.top + this.canvas.clientHeight / 2;
+    const x = before?.width ? (centerX - before.left) / before.width : .5, y = before?.height ? (centerY - before.top) / before.height : .5;
+    this.scale = Math.max(.2, Math.min(5, scale));
+    if (this.svg) {
+      this.svg.style.width = `${this.baseWidth * this.scale}px`; this.svg.style.height = `${this.baseHeight * this.scale}px`;
+      const after = this.svg.getBoundingClientRect();
+      this.canvas.scrollBy(after.left + x * after.width - centerX, after.top + y * after.height - centerY);
+    }
     this.percent.textContent = `${Math.round(this.scale * 100)}%`;
   }
 }

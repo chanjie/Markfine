@@ -13,6 +13,10 @@ public struct WorkspaceSnapshot: Codable, Sendable {
     public let generation: String
     public let root: WorkspaceEntry
 }
+public struct WorkspaceFileSelection: Sendable {
+    public let url: URL
+    public let identity: FileIdentity
+}
 /// Only native user-chosen roots enter this registry. Web commands use opaque IDs, never filesystem paths.
 public actor WorkspaceStore {
     private var root: URL?
@@ -24,6 +28,7 @@ public actor WorkspaceStore {
     deinit { if rootFD >= 0 { Darwin.close(rootFD) } }
     public static func isMarkdown(_ url: URL) -> Bool { ["md", "markdown"].contains(url.pathExtension.lowercased()) }
     public func open(_ url: URL) throws -> WorkspaceSnapshot {
+        guard url.isFileURL, url.host == nil || url.host == "" || url.host == "localhost" else { throw WorkspaceFailure.denied }
         let canonical = url.standardizedFileURL.resolvingSymlinksInPath()
         guard canonical.isFileURL, try canonical.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else { throw WorkspaceFailure.unavailable }
         let fd = Darwin.open(canonical.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
@@ -39,7 +44,7 @@ public actor WorkspaceStore {
     }
     private func checked(_ id: String, generation: String) throws -> URL {
         guard generation == self.generation, let root, let url = entries[id] else { throw WorkspaceFailure.stale }
-        let canonical = url.standardizedFileURL.resolvingSymlinksInPath()
+        let canonical = url.standardizedFileURL
         guard canonical.path == root.path || canonical.path.hasPrefix(root.path == "/" ? "/" : root.path + "/") else { throw WorkspaceFailure.denied }
         return canonical
     }
@@ -74,10 +79,13 @@ public actor WorkspaceStore {
         return result.sorted { a, b in a.directory != b.directory ? a.directory : a.name.localizedStandardCompare(b.name) == .orderedAscending }
     }
     public func file(_ id: String, generation: String) throws -> URL {
+        try fileSelection(id, generation: generation).url
+    }
+    public func fileSelection(_ id: String, generation: String) throws -> WorkspaceFileSelection {
         let url = try checked(id, generation: generation)
         let fd = try directoryFD(url.deletingLastPathComponent()); defer { Darwin.close(fd) }
         var info = stat(); guard fstatat(fd, url.lastPathComponent, &info, AT_SYMLINK_NOFOLLOW) == 0, info.st_mode & S_IFMT == S_IFREG else { throw WorkspaceFailure.denied }
-        return url
+        return WorkspaceFileSelection(url: url, identity: FileIdentity(info))
     }
     /// Refresh only already-displayed opaque entries. No recursive scan or content reads.
     public func modificationDates(_ ids: [String], generation: String) throws -> [String: Double] {

@@ -6,7 +6,7 @@ export type PageTheme = 'paper' | 'kraft' | 'eye';
 export interface ApplicationPreferences extends EditorPreferences {
   language: 'system' | 'zh-Hans' | 'en'; locale: 'zh-Hans' | 'en'; timeZone: 'local' | 'UTC';
   fontChinese: string; fontEnglish: string; editTheme: PageTheme; readTheme: PageTheme;
-  lineNumbers: boolean; showAllFiles: boolean; outlineSide: 'left' | 'right'; filesSide: 'left' | 'right'; outlineWidth: number; editZoom: number; readZoom: number;
+  lineNumbers: boolean; showAllFiles: boolean; showWorkspaceRecents: boolean; outlineSide: 'left' | 'right'; filesSide: 'left' | 'right'; outlineWidth: number; editZoom: number; readZoom: number;
   appearance: 'system' | 'light' | 'dark'; leftWidth: number; rightWidth: number; editLineSpacing: number; readLineSpacing: number;
 }
 export const bodyLineHeight = 1.85;
@@ -14,14 +14,14 @@ export const editingLineHeight = 1.4;
 export const defaultApplicationPreferences: ApplicationPreferences = {
   ...defaultPreferences, language: 'system', locale: 'zh-Hans', timeZone: 'local',
   fontChinese: 'PingFangSC-Regular', fontEnglish: 'PingFangSC-Regular', editTheme: 'paper', readTheme: 'paper',
-  lineNumbers: false, showAllFiles: false, outlineSide: 'left', filesSide: 'left', outlineWidth: 220, editZoom: 1, readZoom: 1,
+  lineNumbers: false, showAllFiles: false, showWorkspaceRecents: false, outlineSide: 'left', filesSide: 'left', outlineWidth: 220, editZoom: 1, readZoom: 1,
   appearance: 'system', leftWidth: 220, rightWidth: 220, editLineSpacing: 1.3, readLineSpacing: 1.3
 };
 export function normalizePreferences(value: unknown, previous = defaultApplicationPreferences): ApplicationPreferences {
   const result = { ...previous };
   if (!value || typeof value !== 'object') return result;
   const input = value as Record<string, unknown>;
-  for (const key of ['shortcutHints', 'focusMode', 'lineNumbers', 'showAllFiles'] as const) if (typeof input[key] === 'boolean') result[key] = input[key];
+  for (const key of ['shortcutHints', 'focusMode', 'lineNumbers', 'showAllFiles', 'showWorkspaceRecents'] as const) if (typeof input[key] === 'boolean') result[key] = input[key];
   if (input.outlineSide === 'left' || input.outlineSide === 'right') result.outlineSide = input.outlineSide;
   if (input.filesSide === 'left' || input.filesSide === 'right') result.filesSide = input.filesSide;
   for (const key of ['editTheme', 'readTheme'] as const) if (['paper', 'kraft', 'eye'].includes(String(input[key]))) result[key] = input[key] as PageTheme;

@@ -75,7 +75,7 @@ class BlockWidget extends WidgetType {
     this.hydrate(element); return true;
   }
   ignoreEvent(event: Event): boolean {
-    return event.target instanceof Element && !!event.target.closest('a');
+    return event.target instanceof Element && !!event.target.closest('a,.image-size-button');
   }
 }
 
@@ -108,6 +108,7 @@ function decorations(state: EditorState, documentID: string, hydrate: (element: 
   const focus = state.field(editorPreferences).focusMode;
   const muted = (from: number, to: number) => focus && (active.name === 'Document' ? !(position >= from && position <= to) : (to < active.from || from > active.to));
   const lines = new Map<number, Set<string>>();
+  const headingStarts = new Map<number, string>();
   const lineClass = (from: number, to: number, className: string) => {
     for (let number = state.doc.lineAt(from).number; number <= state.doc.lineAt(to).number; number++) {
       const start = state.doc.line(number).from;
@@ -132,7 +133,11 @@ function decorations(state: EditorState, documentID: string, hydrate: (element: 
       mark(node.from, node.to, 'image-reference'); return false;
     }
     const heading = /^(?:ATXHeading|SetextHeading)([1-6])$/.exec(name);
-    if (heading) lineClass(node.from, node.to, `live-heading live-h${heading[1]}`);
+    if (heading) {
+      lineClass(node.from, node.to, `live-heading live-h${heading[1]}`);
+      const first = state.doc.lineAt(node.from).from;
+      lineClass(first, first, 'heading-start'); headingStarts.set(first, 'H' + heading[1]);
+    }
     if (name === 'Blockquote') lineClass(node.from, node.to, 'live-quote');
     if (name === 'FencedCode' || name === 'CodeBlock') {
       const source = state.sliceDoc(node.from, node.to);
@@ -154,7 +159,12 @@ function decorations(state: EditorState, documentID: string, hydrate: (element: 
     if (name === 'ListMark' && /^[-+*]$/.test(state.sliceDoc(node.from, node.to))) result.push(Decoration.replace({ widget: new ListMarker('•') }).range(node.from, node.to));
     if (name === 'TaskMarker') result.push(Decoration.replace({ widget: new TaskMarker(node.from, node.to, /x/i.test(state.sliceDoc(node.from, node.to))) }).range(node.from, node.to));
   } });
-  for (const [from, classes] of lines) result.push(Decoration.line({ class: [...classes].join(' ') + (numbers ? ' source-line-number' : ''), attributes: numbers ? { 'data-line': String(state.doc.lineAt(from).number) } : undefined }).range(from));
+  for (const [from, classes] of lines) {
+    const attributes: Record<string, string> = {};
+    if (numbers) attributes['data-line'] = String(state.doc.lineAt(from).number);
+    if (headingStarts.has(from)) attributes['data-heading'] = headingStarts.get(from)!;
+    result.push(Decoration.line({ class: [...classes].join(' ') + (numbers ? ' source-line-number' : ''), attributes }).range(from));
+  }
   return Decoration.set(result, true);
 }
 

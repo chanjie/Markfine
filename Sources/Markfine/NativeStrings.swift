@@ -1,5 +1,8 @@
 let nativeEnglish: [String: String] = [
+    "图片暂存已达上限，请关闭暂不使用的文档后重试": "Image temporary storage is full. Close unused documents and try again.",
     "源码模式": "Source Mode",
+    "文件不是可识别的纯文本，未读取为可编辑文档": "This is not recognized plain text and was not loaded for editing",
+    "文件超过 16 MiB 的文本编辑上限，未截断或修改内容": "The file exceeds the 16 MiB text editing limit. No content was truncated or changed",
     "关于 Markfine": "About Markfine", "首选项…": "Preferences…", "隐藏 Markfine": "Hide Markfine", "退出 Markfine": "Quit Markfine",
     "文件": "File", "新建": "New", "新建标签页": "New Tab", "打开…": "Open…", "保存": "Save", "关闭标签页": "Close Tab", "关闭窗口": "Close Window",
     "编辑": "Edit", "撤销": "Undo", "重做": "Redo", "剪切": "Cut", "复制": "Copy", "全选": "Select All", "粘贴": "Paste",
@@ -13,7 +16,7 @@ let nativeEnglish: [String: String] = [
     "未命名": "Untitled", "未命名.md": "Untitled.md",
     "文档会话已失效": "The document session is no longer valid", "保存请求无效": "Invalid save request", "拒绝重复保存请求": "Duplicate save request rejected", "拒绝旧版本保存请求": "Stale save request rejected",
     "首次保存需要用户选择目标": "Choose a destination for the first save", "替换已有文件需要系统确认": "Replacing an existing file requires confirmation", "目标已在另一文档中打开，不能覆盖": "The destination is open in another tab and cannot be overwritten", "当前版本不提供另存为": "Save As is not available",
-    "无效文件位置": "Invalid file location", "只能打开或保存普通文件": "Only regular files can be opened or saved", "文档不是有效 UTF-8，未替换或丢弃原始字节": "The document is not valid UTF-8. No original bytes were changed or discarded",
+    "无效文件位置": "Invalid file location", "只能打开或保存普通文件": "Only regular files can be opened or saved", "无法无损识别文档的 Unicode 编码，原始字节未改变": "The document's Unicode encoding cannot be identified losslessly. The original bytes are unchanged",
     "原文件已被外部更改、删除或移走；已停止保存并保留编辑": "The original file was changed, deleted or moved externally. Saving stopped; your edits are retained",
     "保存可能已提交但结果未确认；保留编辑，不自动重试或关闭": "Saving may have committed, but is unconfirmed. Keep your edits; do not retry or close automatically",
     "图片路径超出当前文档权限或存在不安全路径": "The image path is unsafe or outside document permissions", "剪贴板没有可用的 PNG、JPEG、TIFF 图片或纯文本": "The clipboard contains no supported PNG, JPEG, TIFF or plain text",

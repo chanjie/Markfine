@@ -15,10 +15,11 @@ public struct ClipboardInput: Sendable {
 public struct ImagePasteResult: Sendable {
     public let reference: String?
     public let text: String?
+    public init(reference: String?, text: String?) { self.reference = reference; self.text = text }
 }
 public struct LocalImage: Sendable { public let data: Data; public let mime: String }
 public enum ImageStoreFailure: Error, CustomStringConvertible {
-    case denied, unsupported, invalidImage, assetsUnavailable, unavailable
+    case denied, unsupported, invalidImage, assetsUnavailable, unavailable, temporaryLimit
     public var description: String {
         switch self {
         case .denied: return "图片路径超出当前文档权限或存在不安全路径"
@@ -26,6 +27,7 @@ public enum ImageStoreFailure: Error, CustomStringConvertible {
         case .invalidImage: return "图片数据无效或过大，未改变正文"
         case .assetsUnavailable: return "资源目录被占用或不可写；正文未改变，图片暂存已保留"
         case .unavailable: return "无法读取或写入本地图片，正文与暂存均保留"
+        case .temporaryLimit: return "图片暂存已达上限，请关闭暂不使用的文档后重试"
         }
     }
 }
@@ -43,12 +45,17 @@ public actor ImageStore {
         var staged: Set<String> = []
         var destination: URL?
         var migrated: [String: String] = [:]
+        var bytes = 0
     }
     private let root: URL
     private let session: URL
     private let sessionID: String
     private let lock: ImageFD
     private var documents: [String: Document] = [:]
+    private var stagedBytes = 0
+    private func checkSpace(_ count: Int, documentID: String) throws {
+        guard count <= 512 * 1_048_576 - stagedBytes, count <= 256 * 1_048_576 - (documents[documentID]?.bytes ?? 0) else { throw ImageStoreFailure.temporaryLimit }
+    }
 
     public init(root: URL, sessionID: String = UUID().uuidString) throws {
         guard UUID(uuidString: sessionID) != nil else { throw ImageStoreFailure.denied }
@@ -82,6 +89,15 @@ public actor ImageStore {
     }
 
     public func paste(_ input: ClipboardInput, documentID: String) throws -> ImagePasteResult {
+        let result = try stage(input, documentID: documentID)
+        guard let reference = result.reference else { return result }
+        if let url = documents[documentID]?.url {
+            return ImagePasteResult(reference: try copyAsset(String(reference.dropFirst("markfine-staging/".count)), documentID: documentID, target: url), text: nil)
+        }
+        return result
+    }
+
+    public func stage(_ input: ClipboardInput, documentID: String) throws -> ImagePasteResult {
         guard documents[documentID] != nil else { throw ImageStoreFailure.denied }
         try Task.checkCancellation()
         guard let image = try Self.encode(input) else {
@@ -89,16 +105,36 @@ public actor ImageStore {
             return ImagePasteResult(reference: nil, text: text)
         }
         let name = "image-" + UUID().uuidString.lowercased() + "." + image.extensionName
+        try checkSpace(image.data.count, documentID: documentID)
         let folder = session.appendingPathComponent(documentID, isDirectory: true)
         try Self.exclusiveWrite(image.data, directory: folder, name: name)
         documents[documentID]?.staged.insert(name)
+        documents[documentID]?.bytes += image.data.count; stagedBytes += image.data.count
         try Task.checkCancellation()
-        if let url = documents[documentID]?.url {
-            let reference = try copyAsset(name, documentID: documentID, target: url)
-            try Task.checkCancellation()
-            return ImagePasteResult(reference: reference, text: nil)
-        }
         return ImagePasteResult(reference: "markfine-staging/" + name, text: nil)
+    }
+
+    public func contains(_ id: String) -> Bool { documents[id] != nil }
+    public func importImage(_ data: Data, documentID: String, local: Bool = true) throws -> String {
+        guard documents[documentID] != nil else { throw ImageStoreFailure.denied }
+        try Task.checkCancellation(); let image = try Self.validatedImage(data)
+        let ext = ["image/png":"png", "image/jpeg":"jpg", "image/gif":"gif", "image/webp":"webp", "image/tiff":"tiff", "image/heic":"heic"][image.mime]!
+        let name = "image-" + UUID().uuidString.lowercased() + "." + ext
+        try checkSpace(data.count, documentID: documentID)
+        try Self.exclusiveWrite(data, directory: session.appendingPathComponent(documentID, isDirectory: true), name: name)
+        documents[documentID]?.staged.insert(name)
+        documents[documentID]?.bytes += data.count; stagedBytes += data.count
+        if local, let url = documents[documentID]?.url { return try copyAsset(name, documentID: documentID, target: url) }
+        return "markfine-staging/" + name
+    }
+    public static func validatedImage(_ data: Data) throws -> LocalImage {
+        guard !data.isEmpty, data.count <= 64 * 1_048_576,
+              let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let type = CGImageSourceGetType(source) as String?, let p = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = p[kCGImagePropertyPixelWidth] as? Int, let height = p[kCGImagePropertyPixelHeight] as? Int,
+              width > 0, height > 0, width <= 32_768, height <= 32_768, width * height <= 100_000_000 else { throw ImageStoreFailure.invalidImage }
+        let types = [UTType.png.identifier: "image/png", UTType.jpeg.identifier: "image/jpeg", UTType.gif.identifier: "image/gif", UTType.webP.identifier: "image/webp", UTType.tiff.identifier: "image/tiff", UTType.heic.identifier: "image/heic"]
+        guard let mime = types[type] else { throw ImageStoreFailure.invalidImage }; return LocalImage(data: data, mime: mime)
     }
 
     public func migrate(_ id: String, to target: URL, references: [String]? = nil) throws -> [String: String] {
@@ -164,9 +200,9 @@ public actor ImageStore {
     }
 
     public func closeDocument(_ id: String) {
-        guard documents.removeValue(forKey: id) != nil else { return }
+        guard let document = documents.removeValue(forKey: id) else { return }
         // Only the exact private UUID directory owned by this live session, never .assets.
-        try? Self.removeDocument(session: session, id: id)
+        do { try Self.removeDocument(session: session, id: id); stagedBytes = max(0, stagedBytes - document.bytes) } catch { /* Keep failed cleanup charged to this session's quota. */ }
     }
 
     public func finish() {
@@ -219,7 +255,20 @@ public actor ImageStore {
         let real = url.standardizedFileURL // Resource callers resolve allowed links first; managed staging never follows links.
         var directory = ImageFD(Darwin.open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC))
         guard directory.value >= 0 else { throw ImageStoreFailure.unavailable }
-        for component in real.pathComponents.dropFirst() {
+        var components = Array(real.pathComponents.dropFirst())
+        // Foundation shortens /private/var to /var after resolving a file URL. Expand
+        // only macOS's root-owned fixed aliases, never arbitrary document/staging links.
+        if let first = components.first, ["var", "tmp", "etc"].contains(first) {
+            var info = stat(), bytes = [CChar](repeating: 0, count: 256)
+            if fstatat(directory.value, first, &info, AT_SYMLINK_NOFOLLOW) == 0, info.st_mode & S_IFMT == S_IFLNK, info.st_uid == 0 {
+                let count = readlinkat(directory.value, first, &bytes, bytes.count - 1)
+                guard count > 0, count < bytes.count else { throw ImageStoreFailure.denied }
+                let target = String(cString: bytes)
+                guard target == "private/" + first || target == "/private/" + first else { throw ImageStoreFailure.denied }
+                components.insert("private", at: 0)
+            }
+        }
+        for component in components {
             let child = openat(directory.value, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
             guard child >= 0 else { throw ImageStoreFailure.denied }
             directory = ImageFD(child)
@@ -279,7 +328,7 @@ public actor ImageStore {
         let folder = session.appendingPathComponent(id, isDirectory: true)
         let directory = try openDirectory(folder)
         let names = try FileManager.default.contentsOfDirectory(atPath: folder.path)
-        guard names.allSatisfy({ $0.range(of: "^image-[a-fA-F0-9-]+\\.(png|jpg)$", options: .regularExpression) != nil }) else { throw ImageStoreFailure.denied }
+        guard names.allSatisfy({ $0.range(of: "^image-[a-fA-F0-9-]+\\.(png|jpg|gif|webp|tiff|heic)$", options: .regularExpression) != nil }) else { throw ImageStoreFailure.denied }
         for name in names { guard unlinkat(directory.value, name, 0) == 0 else { throw ImageStoreFailure.unavailable } }
         let parent = try openDirectory(session)
         guard unlinkat(parent.value, id, AT_REMOVEDIR) == 0 else { throw ImageStoreFailure.unavailable }

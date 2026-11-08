@@ -9,6 +9,7 @@ public struct ExportNode: Codable, Sendable {
     public var href: String?
     public var align: String?
     public var start: Int?
+    public var width: Double?
     public init(tag: String, text: String? = nil, children: [ExportNode]? = nil, src: String? = nil) {
         self.tag = tag; self.text = text; self.children = children; self.src = src
     }
@@ -161,7 +162,8 @@ public enum WordDocument {
             let identity: (String, Int)
             if let existing = imageIDs[src] { identity = existing }
             else { let number = imageIDs.count + 1; files.append(("word/media/image\(number).png", image.data)); identity = (relation("image", "media/image\(number).png"), number); imageIDs[src] = identity }
-            let scale = min(1, 601.7 / image.width, 900 / image.height), width = Int(image.width * scale * 9525), height = Int(image.height * scale * 9525)
+            let requested = node.width.flatMap { $0.isFinite && $0 > 0 ? $0 : nil } ?? image.width
+            let ratio = requested / image.width, scale = min(ratio, 601.7 / image.width, 900 / image.height), width = Int(image.width * scale * 9525), height = Int(image.height * scale * 9525)
             drawingID += 1
             return "<w:r><w:drawing><wp:inline><wp:extent cx=\"\(width)\" cy=\"\(height)\"/><wp:docPr id=\"\(drawingID)\" name=\"Image \(drawingID)\" descr=\"\(xml(node.text ?? "Image"))\"/><a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/picture\"><pic:pic><pic:nvPicPr><pic:cNvPr id=\"0\" name=\"image\(identity.1).png\"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed=\"\(identity.0)\"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"\(width)\" cy=\"\(height)\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"
         }

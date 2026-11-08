@@ -246,12 +246,12 @@ final class DocumentPrintRenderer: NSObject, WKNavigationDelegate {
       if (!(node instanceof Element)) return null;
       if (node.tagName === 'INPUT') return { tag:'#text', text:node.checked ? '☑ ' : '☐ ' };
       const value = { tag:node.tagName.toLowerCase(), children:[...node.childNodes].map(convert).filter(Boolean) };
-      if (value.tag === 'img') { value.src = keys.get(node.src); value.text = node.alt; }
+      if (value.tag === 'img') { value.src = keys.get(node.src); value.text = node.alt; if(node.hasAttribute('width'))value.width=Number(node.getAttribute('width')); }
       if (value.tag === 'a') value.href = node.getAttribute('href');
       if (value.tag === 'ol') value.start = Number(node.getAttribute('start') || 1);
       if (node.style.textAlign) value.align = node.style.textAlign;
       return value;
     };
-    return {nodes:[...article.childNodes].map(convert).filter(Boolean),images};
+    return {nodes:[...article.childNodes].map(convert).filter(Boolean),images,html:article.innerHTML};
     """
 }

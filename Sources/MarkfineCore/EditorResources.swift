@@ -61,7 +61,7 @@ public struct EditorResources {
     }
 
     public func data(_ name: String) throws -> Data {
-        guard ["index.html", "style.css", "app.js", "mermaid-runtime.js"].contains(name) else { throw ResourceFailure.invalid(name) }
+        guard ["index.html", "style.css", "app.js", "mermaid-runtime.js", "paper-texture.png", "kraft-texture.png"].contains(name) else { throw ResourceFailure.invalid(name) }
         return try Self.readRegular(root.appendingPathComponent(name))
     }
 

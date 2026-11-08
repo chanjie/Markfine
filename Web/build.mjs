@@ -16,6 +16,7 @@ if (!/^[a-f0-9]{64}$/.test(inputID ?? '')) throw new Error('Missing build input 
 const outdir = controlled(output);
 await mkdir(outdir, { recursive: true });
 for (const name of ['index.html', 'style.css']) await copyFile(resolve(here, name), resolve(outdir, name));
+for (const name of ['paper-texture.png', 'kraft-texture.png']) await copyFile(resolve(here, 'textures', name), resolve(outdir, name));
 const result = await build({
   absWorkingDir: here, entryPoints: ['src/app.ts'], outfile: resolve(outdir, 'app.js'),
   bundle: true, format: 'iife', platform: 'browser', target: 'safari26',

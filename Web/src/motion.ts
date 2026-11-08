@@ -13,7 +13,7 @@ export function animateScroll(element: HTMLElement, top: number, left = element.
   top = Math.max(0, Math.min(element.scrollHeight - element.clientHeight, top));
   left = Math.max(0, Math.min(element.scrollWidth - element.clientWidth, left));
   duration ??= scrollDuration(Math.max(Math.abs(top - element.scrollTop), Math.abs(left - element.scrollLeft)));
-  if (matchMedia('(prefers-reduced-motion: reduce)').matches) { element.scrollTo(left, top); complete?.(); return; }
+  if (duration <= 0 || matchMedia('(prefers-reduced-motion: reduce)').matches) { element.scrollTo(left, top); complete?.(); return; }
   const fromTop = element.scrollTop, fromLeft = element.scrollLeft, start = performance.now();
   const running = { frame: 0, timer: 0, top, left }; animations.set(element, running);
   // A background/minimized WebView can suspend animation frames. Always commit the final destination.

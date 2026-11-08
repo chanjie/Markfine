@@ -7,7 +7,7 @@ public final class ApplicationSettings {
     public static let editingLineHeight = 1.4
     private let defaults: UserDefaults
     public static let initial: [String: Any] = [
-        "shortcutHints": true, "focusMode": true, "lineNumbers": false, "showAllFiles": false,
+        "shortcutHints": true, "focusMode": true, "lineNumbers": false, "showAllFiles": false, "showWorkspaceRecents": false,
         "language": "system", "timeZone": "local", "fontChinese": "PingFangSC-Regular", "fontEnglish": "PingFangSC-Regular",
         "appearance": "system", "editTheme": "paper", "readTheme": "paper", "outlineSide": "left", "filesSide": "left", "outlineWidth": 220.0,
         "leftWidth": 220.0, "rightWidth": 220.0, "editLineSpacing": 1.3, "readLineSpacing": 1.3, "editZoom": 1.0, "readZoom": 1.0
@@ -35,7 +35,7 @@ public final class ApplicationSettings {
     }
     public static func accepts(_ key: String, _ value: Any) -> Bool {
         switch key {
-        case "shortcutHints", "focusMode", "lineNumbers", "showAllFiles":
+        case "shortcutHints", "focusMode", "lineNumbers", "showAllFiles", "showWorkspaceRecents":
             guard let number = value as? NSNumber else { return false }; return CFGetTypeID(number) == CFBooleanGetTypeID()
         case "language": return ["system", "zh-Hans", "en"].contains(value as? String ?? "")
         case "timeZone": return ["local", "UTC"].contains(value as? String ?? "")

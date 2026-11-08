@@ -24,8 +24,19 @@ function safeCSS(value: string): boolean {
 }
 globalThis.__markfineRenderDiagram = (source, documentID) => {
   const render = serial.then(async () => {
+    // Several diagrams can become visible together. Yield between their synchronous
+    // layouts so input, navigation and UI timers are not starved by a microtask chain.
+    await new Promise<void>(resolve => window.setTimeout(resolve, 0));
     const prepared = prepareDiagram(source, documentID);
-    const { svg } = await mermaid.render(`markfine-diagram-${++sequence}`, prepared);
+    // Mermaid's default temporary measuring node is appended to body. Here body is a
+    // flex column, so that node can steal height from the editor while a graph lays out.
+    const measuring = document.createElement('div');
+    measuring.setAttribute('aria-hidden', 'true');
+    measuring.style.cssText = 'position:fixed;left:-100000px;top:0;width:1200px;pointer-events:none;';
+    document.body.append(measuring);
+    let svg: string;
+    try { ({ svg } = await mermaid.render(`markfine-diagram-${++sequence}`, prepared, measuring)); }
+    finally { measuring.remove(); }
     const parsed = new DOMParser().parseFromString(svg, 'image/svg+xml'), element = parsed.documentElement;
     if (element.localName !== 'svg' || parsed.querySelector('parsererror')) throw new Error(document.documentElement.lang.startsWith('en') ? 'Invalid diagram SVG' : '图表 SVG 无效');
     element.querySelectorAll('script,foreignObject,iframe,object,embed,a,animate,animateTransform,set').forEach(node => node.remove());

@@ -4,6 +4,7 @@ import { installSelectedGFM } from './gfm-extensions';
 import { safeLink } from './links';
 import { t } from './localization';
 import { highlightCode } from './code-highlighting';
+import { imageLabel } from './image-syntax';
 export { validateDiagram } from './diagrams';
 
 export const markdown = new MarkdownIt('commonmark', { html: false, typographer: false });
@@ -50,15 +51,26 @@ export function localImageURL(source: string, documentID: string): string | null
   return `markfine://app/image/${encodeURIComponent(documentID)}/${parts.map(encodeURIComponent).join('/')}`;
 }
 
+let remoteImagePrefixes: string[] = [];
+export function configureImageSources(prefixes: unknown): void {
+  remoteImagePrefixes = Array.isArray(prefixes) ? prefixes.filter((value): value is string => typeof value === 'string' && value.startsWith('https://') && value.length <= 8192).slice(0,2) : [];
+  cache.clear();
+}
+export function remoteImageURL(source: string, documentID: string): string | null {
+  if (!remoteImagePrefixes.some(prefix => source.startsWith(prefix))) return null;
+  const bytes = new TextEncoder().encode(source); if (bytes.length > 8192) return null;
+  return `markfine://app/remote-image/${encodeURIComponent(documentID)}/${btoa(Array.from(bytes, b => String.fromCharCode(b)).join('')).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'')}`;
+}
+
 markdown.renderer.rules.image = (tokens, index, _options, env) => {
   const token = tokens[index];
   const source = String(token.attrGet('src') ?? '');
-  const alt = token.content;
-  const url = localImageURL(source, String(env?.documentID ?? ''));
+  const { alt, width } = imageLabel(token.content);
+  const url = localImageURL(source, String(env?.documentID ?? '')) ?? remoteImageURL(source, String(env?.documentID ?? ''));
   const escape = markdown.utils.escapeHtml;
   const boundary = boundaryAttribute(token.meta);
   if (!url) return `<span class="image-placeholder"${boundary}>${t('图片未加载', 'Image not loaded')} · ${escape(alt)} <code>${escape(source)}</code></span>`;
-  return `<img src="${escape(url)}" alt="${escape(alt)}" loading="lazy" decoding="async"${boundary}>`;
+  return `<img src="${escape(url)}" alt="${escape(alt)}" data-image-source="${escape(source)}"${width ? ` width="${width}" data-image-width="${width}"` : ''} loading="lazy" decoding="async"${boundary}>`;
 };
 
 markdown.renderer.rules.link_open = (tokens, index) => {

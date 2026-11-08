@@ -34,13 +34,13 @@ export function closeTargets(ids: readonly string[], id: string, scope: TabClose
 }
 export function showTabMenu(event: MouseEvent, ids: string[], id: string, close: (scope: TabCloseScope) => void): void {
   event.preventDefault(); document.getElementById('tab-menu')?.remove();
-  const menu = document.createElement('div'); menu.id = 'tab-menu'; menu.className = 'table-menu'; menu.setAttribute('role', 'menu');
+  const menu = document.createElement('div'), previous = document.activeElement; menu.id = 'tab-menu'; menu.className = 'table-menu'; menu.setAttribute('role', 'menu');
   const index = ids.indexOf(id);
-  const dismiss = () => { menu.remove(); document.removeEventListener('pointerdown', outside, true); document.removeEventListener('keydown', keyboard, true); document.dispatchEvent(new Event('tab-menu-dismissed')); };
+  const dismiss = () => { const focused=menu.contains(document.activeElement);menu.remove();if(focused&&previous instanceof HTMLElement&&previous.isConnected)previous.focus({preventScroll:true});document.removeEventListener('pointerdown', outside, true); document.removeEventListener('keydown', keyboard, true); document.dispatchEvent(new Event('tab-menu-dismissed')); };
   const outside = (e: Event) => { if (!menu.contains(e.target as Node)) dismiss(); };
   const keyboard = (e: KeyboardEvent) => {
     if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); dismiss(); }
-    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); const buttons = [...menu.querySelectorAll('button')]; buttons[(buttons.indexOf(document.activeElement as HTMLButtonElement) + (e.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus(); }
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); const buttons = [...menu.querySelectorAll('button')]; buttons[(buttons.indexOf(document.activeElement as HTMLButtonElement) + (e.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus({ preventScroll: true }); }
   };
   const choices: [TabCloseScope, string][] = [['current', t('关闭当前', 'Close Tab')]];
   if (index > 0) choices.push(['left', t('关闭左侧全部', 'Close Tabs to the Left')]);
@@ -48,7 +48,7 @@ export function showTabMenu(event: MouseEvent, ids: string[], id: string, close:
   choices.push(['all', t('关闭所有', 'Close All Tabs')]);
   for (const [scope, text] of choices) { const button = document.createElement('button'); button.dataset.scope = scope; button.setAttribute('role', 'menuitem'); button.textContent = text; button.onclick = () => { dismiss(); close(scope); }; menu.append(button); }
   document.body.append(menu); menu.style.left = Math.max(4, Math.min(event.clientX, innerWidth - menu.offsetWidth - 4)) + 'px'; menu.style.top = Math.max(4, Math.min(event.clientY, innerHeight - menu.offsetHeight - 4)) + 'px';
-  document.addEventListener('pointerdown', outside, true); document.addEventListener('keydown', keyboard, true); menu.querySelector('button')?.focus();
+  document.addEventListener('pointerdown', outside, true); document.addEventListener('keydown', keyboard, true); menu.querySelector('button')?.focus({ preventScroll: true });
 }
 
 export function installReadingTabs(strip: HTMLElement, trigger: HTMLElement): void {

@@ -3,7 +3,7 @@ import { editorMarkdownLanguage } from './editor-language';
 export interface ResourceChange { from: number; to: number; insert: string }
 export function stagedReferences(source: string): string[] {
   if (!source.includes('markfine-staging/')) return [];
-  const candidates = [...new Set(source.match(/markfine-staging\/image-[a-f\d-]+\.(?:png|jpg)/gi) ?? [])];
+  const candidates = [...new Set(source.match(/markfine-staging\/image-[a-f\d-]+\.(?:png|jpg|gif|webp|tiff|heic)/gi) ?? [])];
   const identity = Object.fromEntries(candidates.map(path => [path, path]));
   return [...new Set(imageMigrationChanges(source, identity).map(change => source.slice(change.from, change.to)))];
 }
@@ -14,8 +14,8 @@ export function imageMigrationChanges(source: string, mapping: Readonly<Record<s
   editorMarkdownLanguage.parser.parse(source).iterate({ enter(node) {
     if (node.name !== 'Image' && node.name !== 'LinkReference') return;
     const raw = source.slice(node.from, node.to);
-    const destination = (node.name === 'Image' ? /\]\(\s*(<?)(markfine-staging\/image-[a-f\d-]+\.(?:png|jpg))(?=>?(?:\s|\)))/i :
-      /:\s*(<?)(markfine-staging\/image-[a-f\d-]+\.(?:png|jpg))(?=>?(?:\s|$))/i).exec(raw);
+    const destination = (node.name === 'Image' ? /\]\(\s*(<?)(markfine-staging\/image-[a-f\d-]+\.(?:png|jpg|gif|webp|tiff|heic))(?=>?(?:\s|\)))/i :
+      /:\s*(<?)(markfine-staging\/image-[a-f\d-]+\.(?:png|jpg|gif|webp|tiff|heic))(?=>?(?:\s|$))/i).exec(raw);
     if (!destination) return false;
     const old = destination[2], replacement = mapping[old];
     if (typeof replacement !== 'string' || /[\u0000-\u0020<>"()\\]/.test(replacement)) return false;

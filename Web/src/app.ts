@@ -6,15 +6,15 @@ import { defaultKeymap, history, historyKeymap, isolateHistory, redo, undo } fro
 import { editorMarkdown } from './editor-language';
 import { blockPreview, composition } from './preview';
 import { SaveMachine, protectClose, protectCloseAll, type Context } from './save-machine';
-import { formatTransaction, findMatch, replacementChanges, literalPattern } from './commands';
+import { formatTransaction, findMatch, replacementChanges, literalPattern, physicalFormatShortcut } from './commands';
 import { deletionTransaction } from './deletion';
 import { imageMigrationChanges, migrateImageReferences, stagedReferences } from './migration';
 import { newID } from './protocol';
 import { documentOutline, type OutlineHeading } from './outline';
 import { bodyLineHeight, editingLineHeight, defaultApplicationPreferences, normalizePreferences, preferencesEffect, sourceModeEffect } from './editor-preferences';
 import { formatContext } from './format-context';
-import { tableComposing, tableHasFocus, focusTableSelection, navigateTable, deleteTableCell } from './table-editor';
-import { renderBlock } from './renderer';
+import { tableComposing, tableHasFocus, focusTableSelection, navigateTable, deleteTableCell,tableCopySelection,tableHasRange,tableCellSelection } from './table-editor';
+import { renderBlock,configureImageSources } from './renderer';
 import { t, setLanguage, localizePage, formatTimestamp } from './localization';
 import { safeLink } from './links';
 import { installOutlineResize, installScrollIndicators } from './ui-tools';
@@ -27,19 +27,32 @@ import { replaceablePreview } from './preview-state';
 import { tabLabel, closeTargets, showTabMenu, installReadingTabs, pathTooltip, type TabCloseScope } from './tab-navigation';
 import { SearchHighlights } from './search-highlights';
 import { exportHTML } from './document-output';
+import { fileIcon } from './file-icons';
+import { decodeFragment, headingTargets } from './heading-navigation';
+import { DocumentTransition } from './document-transition';
+import { sourceLinkTarget } from './inline-presentation';
+import { referenceIndex } from './reference-context';
+import { chapterRange,paragraphRange,copyMarkdown,imageSources,inlinePlainText,type SourceRange } from './content-fragment';
+import { replaceImageDestinations } from './image-syntax';
+import { ImageControls } from './image-controls';
+import { contextMenu, preserveContextSelection, isContextGesture } from './context-menu';
+import { slashMenu } from './slash-menu';
+import { pairedPunctuation } from './paired-punctuation';
+import { preserveLineEndings, lineEndings, serializeText, textPresentation, textParagraphRange, renderText, textSnapshot, selectedRawText } from './text-document';
 
 declare global {
   var __markfineBootstrap: Context;
-  var markfine: { receive(message: Record<string, unknown>): boolean; prepareSnapshot(source: string, mapping: Record<string, string>): string; stagedReferences(source: string): string[]; exportSnapshot(id: string): Promise<{ html: string; resources: string[] }> };
+  var markfine: { receive(message: Record<string, unknown>): boolean; prepareSnapshot(source: string, mapping: Record<string, string>): string; stagedReferences(source: string): string[]; imageSources(source:string):string[];replaceImageDestinations(source:string,mapping:Record<string,string>):string;exportSnapshot(id: string): Promise<{ html: string; resources: string[] }> };
   var __markfineRenderDiagram: ((source: string, documentID: string) => Promise<SVGElement>) | undefined;
 }
 export interface EditorDocument {
   id: string; title: string; path: string; state: EditorState; saves: SaveMachine; locks: Compartment;
-  imageLocked: boolean; closeLocked: boolean; numbers: Compartment; sourceStyles: Compartment; preview: boolean; unsupported: boolean; readerScroll?: number; savedAt?: number;
-  scroll?: ReturnType<EditorView['scrollSnapshot']>; unsubscribe: () => void;
+  imageLocked: boolean; closeLocked: boolean; copyLocked:boolean;numbers: Compartment; sourceStyles: Compartment; preview: boolean; unsupported: boolean; readerScroll?: number; savedAt?: number;
+  scroll?: ReturnType<typeof EditorView.scrollIntoView>; scrollLeft?: number; unsubscribe: () => void;
   resume?: { mode: string; line: number; fraction: number }; resumeShown?: boolean;
+  textFile: boolean; language: string; encoding: string;
 }
-interface PasteJob { id: string; documentID: string; revision: number; selection: EditorSelection; cancelRequested: boolean }
+interface PasteJob { id: string; documentID: string; revision: number; selection: EditorSelection; cancelRequested: boolean; failure?:string;tableTarget:boolean }
 const context = globalThis.__markfineBootstrap;
 const transport = (body: Record<string, unknown>): void => {
   const host = globalThis as unknown as { webkit: { messageHandlers: { markfine: { postMessage(body: unknown): void } } } };
@@ -55,6 +68,8 @@ export class EditorApplication {
   pasteJob: PasteJob | null = null;
   closing = false;
   private notice = '';
+  private copyFeedbackID = 0;
+  private copyFeedbackTimer = 0;
   private initialized = false;
   private mermaidPromise?: Promise<void>;
   private mermaidResolve?: () => void;
@@ -63,6 +78,7 @@ export class EditorApplication {
   private preferences = { ...defaultApplicationPreferences };
   reading = false;
   private outlineHidden = false;
+  private filesHidden = false;
   private outlineBeforeReading = false;
   private outlineTimer = 0;
   private centerFrame = 0;
@@ -77,7 +93,7 @@ export class EditorApplication {
   private hintTimer = 0;
   sourceEditing = false;
   private latestOpenRequest = '';
-  private openRequests = new Map<string, { replaceID?: string; pin: boolean }>();
+  private openRequests = new Map<string, { replaceID?: string; pin: boolean; link?: boolean }>();
   private stalePreviewIDs = new Set<string>();
   private readonly diagramViewer = new DiagramViewer();
   private diagramTimers = new WeakMap<HTMLElement, number>();
@@ -85,24 +101,29 @@ export class EditorApplication {
   private positionJump = 0;
   private resumeTimer = 0;
   private findGeneration = 0;
+  private pendingMatch?: { view: EditorView; position: number; run: () => void };
   private findOffset = 0;
   private searchRoom = 0;
   private readonly highlights = new SearchHighlights(() => byID(this.reading ? 'reader-content' : 'editor'));
   private diagnostics = new Map<string, number>();
+  private readonly documentTransition = new DocumentTransition(byID('main'), byID('document-title'));
+  private readonly imageControls=new ImageControls({source:id=>this.documents.get(id)?.state.doc.toString(),canEdit:id=>this.activeID===id&&!this.reading&&!this.composing()&&!this.documents.get(id)?.imageLocked&&!this.documents.get(id)?.copyLocked&&!this.closing,zoom:()=>this.zoom,change:(id,change)=>{this.edit(id,{changes:change,annotations:isolateHistory.of('full'),userEvent:'input.imageSize'});},measure:()=>this.view?.requestMeasure()});
   private readonly workspaceBrowser = new WorkspaceBrowser((kind, fields) => this.post(kind, fields), (entry, generation, pin) => this.openWorkspaceFile(entry, generation, pin),
     value => { this.applyPreferences({ showAllFiles: value }); this.persistPreference('showAllFiles', value); }, () => { this.applyLayout(); this.renderChrome(); });
 
   constructor() {
+    preserveContextSelection();
+    byID<HTMLInputElement>('show-workspace-recents').onchange = event => { const value = (event.target as HTMLInputElement).checked; this.applyPreferences({ showWorkspaceRecents: value }); this.persistPreference('showWorkspaceRecents', value); };
     byID('toggle-outline').onclick = () => this.toggleOutline();
     byID('hide-outline').onclick = () => this.toggleOutline();
+    byID('toggle-files').onclick = () => this.toggleFiles();
+    byID('hide-files').onclick = () => this.toggleFiles();
     byID('toggle-reading').onclick = () => this.setReading(!this.reading);
     byID('exit-reading').onclick = () => this.setReading(false);
     byID('toggle-source').onclick = () => this.toggleSource();
     byID('move-outline').onclick = () => { const side = this.preferences.outlineSide === 'left' ? 'right' : 'left'; this.applyPreferences({ outlineSide: side }); this.persistPreference('outlineSide', side); };
     byID('move-files').onclick = () => { const side = this.preferences.filesSide === 'left' ? 'right' : 'left'; this.applyPreferences({ filesSide: side }); this.persistPreference('filesSide', side); };
     installReadingTabs(byID('tab-strip'), byID('tabs-trigger'));
-    byID('tabs-trigger').ondblclick = () => this.post('zoomWindow');
-    byID('reading-header').ondblclick = event => { if (event.target instanceof Element && !event.target.closest('button')) this.post('zoomWindow'); };
     byID('resume-position').onclick = () => this.resumePosition();
     byID('open-unsupported').onclick = () => { if (this.active?.unsupported) this.post('openUnsupported', { documentID: this.activeID }); };
     byID('zoom-button').onclick = () => { const menu = byID('zoom-menu'); menu.hidden = !menu.hidden; byID('zoom-button').setAttribute('aria-expanded', String(!menu.hidden)); };
@@ -119,32 +140,45 @@ export class EditorApplication {
     };
     for (const side of ['left', 'right'] as const) installOutlineResize(byID(side + '-resize'), (width, persist) => resize(side, width, persist), () => side);
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => this.applyLayout());
-    new ResizeObserver(() => { this.applyLayout(); this.scheduleCenter(); }).observe(byID('main'));
+    matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change', () => this.documentTransition.cancel());
+    document.addEventListener('keydown', () => this.documentTransition.cancel(), true);
+    new ResizeObserver(() => this.applyLayout()).observe(byID('main'));
     byID('main').addEventListener('wheel', event => {
+      this.documentTransition.cancel();
       if (event.metaKey || event.ctrlKey) { event.preventDefault(); this.zoomBy(Math.exp(-event.deltaY * .003)); }
-      else { this.positionJump++; this.findGeneration++; for (const element of byID('main').querySelectorAll<HTMLElement>('.cm-scroller,.reader,pre,table,.diagram')) stopScroll(element); }
+      else { this.positionJump++; this.findGeneration++; cancelAnimationFrame(this.centerFrame); this.centerFrame = 0; for (const element of byID('main').querySelectorAll<HTMLElement>('.cm-scroller,.reader,pre,table,.diagram')) stopScroll(element); }
     }, { passive: false });
-    byID('editor').addEventListener('pointerdown', () => { this.pointerSelecting = true; this.findGeneration++; if (this.view) stopScroll(this.view.scrollDOM); });
-    byID('reader').addEventListener('pointerdown', () => { this.positionJump++; this.findGeneration++; stopScroll(byID('reader')); });
-    document.addEventListener('pointerup', () => { if (this.pointerSelecting) { this.pointerSelecting = false; this.scheduleCenter(); } });
+    byID('editor').addEventListener('pointerdown', event => { if (event.button !== 0 || isContextGesture(event)) return; this.documentTransition.cancel(); this.pointerSelecting = true; this.findGeneration++; if (this.view) stopScroll(this.view.scrollDOM); });
+    byID('reader').addEventListener('pointerdown', () => { this.documentTransition.cancel(); this.positionJump++; this.findGeneration++; stopScroll(byID('reader')); });
+    document.addEventListener('pointerup', () => { if (this.pointerSelecting) { this.pointerSelecting = false; if(!this.view||!tableHasRange(this.view))this.scheduleCenter(); } });
     byID('editor').addEventListener('compositionend', () => queueMicrotask(() => this.scheduleCenter()));
     byID('editor').addEventListener('transitionend', event => { if (event.target instanceof Element && event.target.classList.contains('link-syntax')) this.scheduleCenter(); });
     document.addEventListener('click', event => {
-      const link = event.target instanceof Element ? event.target.closest<HTMLElement>('[data-link-href],a[href]') : null;
-      if (!link || !byID('main').contains(link)) return;
-      if (link.tagName === 'A') event.preventDefault();
+      if (!(event.target instanceof Element) || !byID('main').contains(event.target)) return;
+      if (this.active?.textFile) return;
+      const link = event.target.closest<HTMLElement>('[data-link-href],a[href]');
+      if (link?.tagName === 'A') event.preventDefault();
       if (event.button !== 0 || !event.metaKey) return;
-      event.preventDefault(); event.stopPropagation();
-      const href = link.dataset.linkHref ?? link.getAttribute('href');
+      const position = !link && this.sourceEditing && this.view?.contentDOM.contains(event.target) ? this.view.posAtCoords({ x: event.clientX, y: event.clientY }) : null;
+      const href = link?.dataset.linkHref ?? link?.getAttribute('href') ??
+        (position !== null && this.view ? sourceLinkTarget(this.view.state, position, this.view.state.field(referenceIndex).context) : null);
       if (!this.active || !href || !safeLink(href)) return;
-      if (href.startsWith('#')) { const anchor = byID('reader-content').querySelector<HTMLElement>('[id="' + CSS.escape(decodeURIComponent(href.slice(1))) + '"]'); if (anchor && this.reading) this.scrollReaderTo(anchor); }
-      else if (event.isTrusted) this.post('openLink', { documentID: this.activeID, href });
+      event.preventDefault(); event.stopPropagation();
+      if (href.startsWith('#')) void this.navigateFragment(href.slice(1));
+      else if (event.isTrusted) {
+        const requestID = newID(); this.latestOpenRequest = requestID; this.openRequests.clear(); this.openRequests.set(requestID, { pin: true, link: true });
+        this.post('openLink', { documentID: this.activeID, href, requestID });
+      }
     }, true);
     byID('reader').addEventListener('scroll', () => this.updateReadingOutline());
-    byID('tab-strip').ondblclick = event => { if (event.target instanceof Element && !event.target.closest('button,.tab')) { if (this.reading) this.post('zoomWindow'); else this.command('new'); } };
+    byID('reader').addEventListener('copy', event => { if (!this.active?.textFile) return; const text = this.readerSelection(); if (text) { event.preventDefault(); void this.copyContent(undefined, false, text, true); } });
+    byID('tab-strip').ondblclick = event => { if (!this.reading && event.target instanceof Element && !event.target.closest('button,.tab')) this.command('new'); };
     byID('editor').addEventListener('table-paste', () => this.requestPaste());
+    byID('editor').addEventListener('table-copy',event=>{const detail=(event as CustomEvent<{markdown:string;raw:boolean}>).detail;void this.copyContent(undefined,false,detail.markdown,detail.raw);});
+    byID('editor').addEventListener('table-copy-request',event=>{void this.copyContent(undefined,!!(event as CustomEvent<{cut:boolean}>).detail.cut);});
     byID('dismiss-notice').onclick = () => { this.notice = ''; this.renderChrome(); };
     byID('cancel-paste').onclick = () => this.cancelPaste();
+    byID('retry-paste').onclick=()=>this.resolvePaste('retry');byID('local-paste').onclick=()=>this.resolvePaste('local');
     byID<HTMLInputElement>('query').oninput = () => this.find(false, true);
     byID('find-next').onclick = () => this.find(false); byID('find-previous').onclick = () => this.find(true);
     byID('replace-one').onclick = () => this.replace(false); byID('replace-all').onclick = () => this.replace(true);
@@ -158,7 +192,14 @@ export class EditorApplication {
       }
     });
     document.addEventListener('keydown', event => {
+      const action = physicalFormatShortcut(event);
+      if (action && event.target instanceof Element && event.target.closest('#editor') && !this.composing() && this.command(action)) {
+        event.preventDefault(); event.stopPropagation();
+      }
+    }, true);
+    document.addEventListener('keydown', event => {
       if (event.defaultPrevented || event.isComposing || this.composing()) return;
+      if (document.querySelector('dialog[open]')) return;
       if (event.key === 'Escape' && !byID('find-panel').hidden) { event.preventDefault(); this.hideFind(); return; }
       if (event.key === 'Escape' && !byID('zoom-menu').hidden) { byID('zoom-menu').hidden = true; byID('zoom-button').setAttribute('aria-expanded', 'false'); event.preventDefault(); return; }
       if (this.reading && !document.querySelector('dialog[open]') && !(event.target instanceof HTMLInputElement) && !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey) {
@@ -183,20 +224,70 @@ export class EditorApplication {
   get active(): EditorDocument | undefined { return this.documents.get(this.activeID); }
   composing(): boolean { return !!this.view && (this.view.composing || this.view.state.field(composition) || tableComposing(this.view)); }
   setNotice(text: string): void { this.notice = text; this.renderChrome(); }
+  private copyFeedback(text: string, id: number, duration = 0): void {
+    if (id !== this.copyFeedbackID) return;
+    clearTimeout(this.copyFeedbackTimer); const element = byID('copy-feedback'); element.textContent = text; element.hidden = !text;
+    if (duration) this.copyFeedbackTimer = window.setTimeout(() => { if (id === this.copyFeedbackID) { element.hidden = true; element.textContent = ''; } }, duration);
+  }
+  private readerSelection(): string {
+    const selection = getSelection();
+    if (!selection?.rangeCount || !selection.anchorNode || !byID('reader').contains(selection.anchorNode)) return '';
+    return this.active?.textFile ? selectedRawText(this.active.state.doc, byID('reader-content'), selection.getRangeAt(0)) ?? '' : selection.toString();
+  }
+
+  private viewportSnapshot(): ReturnType<typeof EditorView.scrollIntoView> {
+    const view = this.view!, port = view.scrollDOM.getBoundingClientRect(), column = view.contentDOM.getBoundingClientRect();
+    const point = { x: Math.max(port.left + 16, Math.min(port.right - 16, column.left + 16)), y: port.top + 6 };
+    const doc = view.contentDOM.ownerDocument as Document & { caretRangeFromPoint?: (x: number, y: number) => Range | null };
+    // Capture the actual displayed text before a pending height-map measure can move it.
+    // posAtDOM does not flush layout; posAtCoords does, so it is only the control/widget fallback.
+    const hit = doc.caretRangeFromPoint?.(point.x, point.y);
+    if (hit && view.contentDOM.contains(hit.startContainer) && !hit.startContainer.parentElement?.closest('.markdown-block,.live-table')) {
+      try {
+        const position = view.posAtDOM(hit.startContainer, hit.startOffset), probe = hit.cloneRange();
+        if (hit.startContainer.nodeType === Node.TEXT_NODE && hit.startOffset < hit.startContainer.textContent!.length) probe.setEnd(hit.startContainer, hit.startOffset + 1);
+        const caret = [...probe.getClientRects()].find(rect => rect.height > 0);
+        if (caret && Math.abs(caret.top - port.top) <= view.scrollDOM.clientHeight) return EditorView.scrollIntoView(position, { y: 'start', yMargin: caret.top - port.top, x: 'nearest' });
+      } catch { /* Generated widgets may have no direct parent-view text coordinate. */ }
+    }
+    const position = view.posAtCoords(point, false);
+    const caret = position === null ? null : view.coordsAtPos(position);
+    if (position === null || !caret || Math.abs(caret.top - port.top) > view.scrollDOM.clientHeight) return view.scrollSnapshot();
+    // A real visible text coordinate remains stable across re-created height maps and wrapped
+    // lines. Let CodeMirror restore that coordinate; do not infer it from an estimated line top.
+    return EditorView.scrollIntoView(position, { y: 'start', yMargin: caret.top - port.top, x: 'nearest' });
+  }
 
   private load(message: Record<string, unknown>): void {
     const id = String(message.documentID);
     const openRequest = String(message.openRequestID ?? '');
     const stale = !!openRequest && openRequest !== this.latestOpenRequest;
-    if (this.documents.has(id)) { if (!stale) { this.stalePreviewIDs.delete(id); this.activate(id); this.finishWorkspaceOpen(openRequest, id); } return; }
+    if (this.documents.has(id)) {
+      if (!stale) { this.stalePreviewIDs.delete(id); this.activateOpenedDocument(id, message.fragment, openRequest); this.finishWorkspaceOpen(openRequest, id); }
+      return;
+    }
     const locks = new Compartment(), numbers = new Compartment(), sourceStyles = new Compartment();
     const source = String(message.markdown), separator = source.includes('\r\n') ? '\r\n' : source.includes('\r') ? '\r' : '\n';
+    const textFile = message.textFile === true, language = typeof message.language === 'string' ? message.language : '';
     const state = EditorState.create({ doc: source, extensions: [
-      history(), editorMarkdown(), EditorView.lineWrapping,
+      history(), preserveLineEndings(source), EditorView.lineWrapping, pairedPunctuation(),
+      textFile ? textPresentation(language) : [editorMarkdown(), slashMenu(), blockPreview(id, element => this.hydrate(element, id)), documentOutline],
+      EditorView.scrollHandler.of((view, range, options) => {
+        const pending = this.pendingMatch;
+        if (options.y !== 'center' || pending?.view !== view || pending.position !== range.head) return false;
+        this.pendingMatch = undefined;
+        // Let CodeMirror finish measuring the requested source range before our smooth scroll.
+        // The new request replaces any pending tab snapshot; no old restoration can run after it.
+        queueMicrotask(pending.run); return true;
+      }),
       locks.of(EditorState.readOnly.of(this.reading || message.unsupported === true)), numbers.of([]),
-      sourceStyles.of(this.sourceEditing ? syntaxHighlighting(defaultHighlightStyle) : []),
+      sourceStyles.of(this.sourceEditing && !textFile ? syntaxHighlighting(defaultHighlightStyle) : []),
       keymap.of([
         { key: 'Mod-s', run: () => { this.saveActive(); return true; } },
+        {key:'Mod-c',run:()=>this.command('copy')},{key:'Mod-x',run:()=>this.command('cut')},
+        // Consume this before CodeMirror's default Mod-/ comment command. The app owns
+        // source/live presentation; a mode shortcut must never rewrite the Markdown.
+        { key: 'Mod-/', run: () => { this.command('toggleSource'); return true; } },
         ...(['left', 'right', 'up', 'down'] as const).map(direction => ({ key: 'Arrow' + direction[0].toUpperCase() + direction.slice(1), run: (view: EditorView) => !this.sourceEditing && navigateTable(view, direction) })),
         ...Object.entries({ 'Mod-b': 'bold', 'Mod-i': 'italic', 'Mod-k': 'link', 'Mod-Alt-k': 'inlineCode', 'Mod-Alt-c': 'codeBlock',
           'Mod-Alt-q': 'quote', 'Mod-Alt-o': 'ordered', 'Mod-Alt-u': 'unordered', 'Mod-Alt-x': 'task', 'Mod-Alt-t': 'table',
@@ -206,11 +297,9 @@ export class EditorApplication {
         }).map(([key, action]) => ({ key, run: () => this.command(action) })),
         ...historyKeymap, ...defaultKeymap
       ]),
-      blockPreview(id, element => this.hydrate(element, id)),
-      documentOutline,
-      EditorView.contentAttributes.of(() => ({ 'aria-label': t('Markdown 正文', 'Markdown document'), spellcheck: 'false', autocorrect: 'off', autocapitalize: 'off' })),
+      EditorView.contentAttributes.of(() => ({ 'aria-label': textFile ? t('纯文本正文', 'Plain text document') : t('Markdown 正文', 'Markdown document'), spellcheck: 'false', autocorrect: 'off', autocapitalize: 'off' })),
       EditorView.exceptionSink.of(error => { this.errors.push(String(error)); this.diagnostic('editorException'); this.setNotice(t('编辑器发生异常，请保留当前内容：', 'Editor error. Keep your current content: ') + String(error)); }),
-      EditorView.domEventHandlers({ paste: (event, view) => {
+      EditorView.domEventHandlers({ copy:(event)=>{if(!this.reading&&!this.composing()){event.preventDefault();void this.copyContent();return true;}return false;},cut:(event)=>{if(!this.reading&&!this.composing()){event.preventDefault();void this.copyContent(undefined,true);return true;}return false;},paste: (event, view) => {
         if (view.composing || view.state.field(composition)) return false;
         event.preventDefault(); this.requestPaste(); return true;
       } }),
@@ -221,37 +310,57 @@ export class EditorApplication {
         if (update.docChanged) {
           this.findGeneration++; if (this.view) stopScroll(this.view.scrollDOM);
           if (!byID('find-panel').hidden) this.highlights.set(byID<HTMLInputElement>('query').value);
-          if (!item.unsupported) item.preview = false; item.saves.edited(update.state.doc); this.updateCount();
+          if (!item.unsupported) item.preview = false; item.saves.edited(update.state.doc, update.state.field(lineEndings).key); this.updateCount();
         }
         // A focus-only blur must not replace a TOC button between mousedown and click.
         if (update.docChanged || update.selectionSet) this.renderOutline();
         if (update.docChanged || update.selectionSet || update.focusChanged) this.scheduleHint();
         if (update.docChanged && this.reading) this.renderReading();
-        if (update.docChanged || update.selectionSet || update.focusChanged) this.scheduleCenter();
+        if (update.docChanged || update.selectionSet) this.scheduleCenter();
       })
     ] });
     const saves = new SaveMachine(context, id, state.doc, transport);
     saves.lineSeparator = separator;
     const item: EditorDocument = { id, title: String(message.title), path: String(message.path), state, saves, locks,
-      imageLocked: false, closeLocked: false, numbers, sourceStyles, preview: message.preview === true, unsupported: message.unsupported === true, unsubscribe: () => {}, resume: message.resume as EditorDocument['resume'] };
+      imageLocked: false, closeLocked: false,copyLocked:false, numbers, sourceStyles, preview: message.preview === true, unsupported: message.unsupported === true, unsubscribe: () => {}, resume: message.resume as EditorDocument['resume'],
+      textFile, language, encoding: typeof message.encoding === 'string' ? message.encoding : 'UTF-8' };
+    saves.serialize = text => serializeText(text, item.state.field(lineEndings));
+    saves.initializeLineEndings(state.field(lineEndings).key);
     this.documents.set(id, item); item.unsubscribe = saves.subscribe(() => this.renderChrome());
     if (stale) { this.stalePreviewIDs.add(id); return; }
-    if (!this.composing()) this.activate(id); else this.renderChrome();
+    if (!this.composing()) this.activateOpenedDocument(id, message.fragment, openRequest); else this.renderChrome();
     this.finishWorkspaceOpen(openRequest, id);
+  }
+
+  private activateOpenedDocument(id: string, fragment: unknown, request: string): void {
+    const changed = !!this.active && this.activeID !== id;
+    const linked = typeof fragment === 'string' || this.openRequests.get(request)?.link === true;
+    if (!this.activate(id)) return;
+    const reveal = changed && linked ? this.documentTransition.begin() : () => {};
+    if (typeof fragment === 'string') void this.navigateFragment(fragment, changed, reveal);
+    else reveal();
   }
 
   activate(id: string): boolean {
     if (this.composing()) { this.setNotice(t('请先完成当前中文组词', 'Finish the current input composition first')); return false; }
     const next = this.documents.get(id); if (!next) return false;
     if (next.closeLocked) return false;
+    this.documentTransition.cancel();
     if (id === this.activeID) return true;
-    this.rememberPosition(); this.resetSearchRoom(); this.dismissResume(); this.findGeneration++; this.positionJump++;
+    this.copyFeedback('', this.copyFeedbackID); this.copyFeedbackID++;
+    this.rememberPosition(); this.resetSearchRoom(); this.dismissResume(); this.findGeneration++; this.positionJump++; this.pendingMatch = undefined;
     if (next.unsupported && this.reading) this.setReading(false);
     const previous = this.active;
-    if (previous && this.view) { previous.state = this.view.state; previous.scroll = this.view.scrollSnapshot(); if (this.reading) previous.readerScroll = byID('reader').scrollTop; }
+    if (previous && this.view) {
+      const scroll = !this.reading ? this.viewportSnapshot() : undefined;
+      previous.state = this.view.state;
+      if (this.reading) previous.readerScroll = byID('reader').scrollTop;
+      else { previous.scroll = scroll; previous.scrollLeft = this.view.scrollDOM.scrollLeft; }
+    }
     this.activeID = id;
     if (this.view) this.view.setState(next.state);
     else this.view = new EditorView({ state: next.state, parent: byID('editor') });
+    this.view.scrollDOM.scrollLeft = next.scrollLeft ?? 0;
     this.view.dispatch({ effects: [preferencesEffect.of(this.preferences), sourceModeEffect.of(this.sourceEditing), next.scroll ?? EditorView.scrollIntoView(next.state.selection.main.head, { y: 'nearest' })] });
     if (!next.scroll && this.view.state.selection.main.head === 0) {
       // A reused EditorView keeps its DOM scroller across setState. A newly opened document
@@ -263,11 +372,13 @@ export class EditorApplication {
             this.positionJump === jump && this.findGeneration === find && !this.pointerSelecting && !this.composing()) view.scrollDOM.scrollTop = 0;
       } });
     }
-    this.applyLayout();
     if (this.reading) { this.pin(next); this.renderReading(); byID('reader').scrollTop = next.readerScroll ?? 0; byID('reader').focus({ preventScroll: true }); }
     else if (next.unsupported) byID('unsupported').focus();
-    else { this.view.focus(); this.scheduleCenter(); }
-    this.notice = ''; this.renderChrome(); this.post('activeDocument', { documentID: id });
+    else this.view.focus();
+    this.notice = ''; this.renderChrome(); this.applyLayout(); this.post('activeDocument', { documentID: id });
+    // Finish the tab's pending built-in scroll snapshot before subsequent wheel/find actions.
+    // A public geometry read flushes CodeMirror's scheduled measure without changing selection.
+    if (!this.reading && !next.unsupported) { this.view.coordsAtPos(this.view.state.selection.main.head); this.view.scrollDOM.scrollLeft = next.scrollLeft ?? 0; }
     if (!byID('find-panel').hidden) this.highlights.set(byID<HTMLInputElement>('query').value);
     this.offerResume(next);
     return true;
@@ -280,19 +391,21 @@ export class EditorApplication {
     const item = this.documents.get(id); if (!item) return false;
     if (item.unsupported && spec.changes) return false;
     if (this.activeID === id && this.view) this.view.dispatch(spec);
-    else { const transaction = item.state.update(spec); item.state = transaction.state; if (transaction.docChanged) { item.preview = false; item.saves.edited(item.state.doc); } }
+    else { const transaction = item.state.update(spec); item.state = transaction.state; if (transaction.docChanged) { item.scroll = item.scroll?.map(transaction.changes); item.preview = false; item.saves.edited(item.state.doc, item.state.field(lineEndings).key); } }
     return true;
   }
   private lock(item: EditorDocument): void {
-    this.edit(item.id, { effects: item.locks.reconfigure(EditorState.readOnly.of(this.reading || item.unsupported || item.imageLocked || item.closeLocked)) });
+    this.edit(item.id, { effects: item.locks.reconfigure(EditorState.readOnly.of(this.reading || item.unsupported || item.imageLocked || item.closeLocked || item.copyLocked)) });
   }
   saveActive(): boolean {
     const item = this.active;
-    if (!item || item.unsupported || this.composing() || item.imageLocked || item.closeLocked) return false;
+    if (!item || item.unsupported || this.composing() || item.imageLocked || item.closeLocked ||item.copyLocked) return false;
     this.notice = ''; item.saves.requestSave(); return true;
   }
   command(action: string): boolean {
     if (this.composing()) return false;
+    // A modal confirmation/help/diagram must not leave menu commands operating on the document behind it.
+    if (document.querySelector('dialog[open]') && action !== 'close') return false;
     if (action === 'toggleSource') { this.toggleSource(); return true; }
     if (action === 'toggleReading') { this.setReading(!this.reading); return true; }
     if (action === 'toggleLineNumbers') { this.applyPreferences({ lineNumbers: !this.preferences.lineNumbers }); this.persistPreference('lineNumbers', this.preferences.lineNumbers); return true; }
@@ -301,11 +414,12 @@ export class EditorApplication {
     if (action === 'userGuide') { showHelp(byID<HTMLDialogElement>('help-dialog'), true); return true; }
     if (action === 'zoomIn' || action === 'zoomOut' || action === 'zoomReset') { this.zoomBy(action === 'zoomReset' ? 1 / this.zoom : action === 'zoomIn' ? 1.1 : 1 / 1.1); return true; }
     if (action === 'toggleOutline') { this.toggleOutline(); return true; }
+    if (action === 'toggleFiles') { this.toggleFiles(); return true; }
     if (action === 'new' || action === 'open') {
       if (this.closing) return false; this.post(action); return true;
     }
     if (action === 'save') return this.saveActive();
-    if (action === 'export' || action === 'print') { if (!this.active || this.active.unsupported || this.closing || this.active.imageLocked) return false; this.post('exportDocument', { documentID: this.activeID, printing: action === 'print', mode: this.reading ? 'read' : this.sourceEditing ? 'source' : 'edit' }); return true; }
+    if (action === 'export' || action === 'print') { if (!this.active || this.active.unsupported || this.closing || this.active.imageLocked) return false; this.post('exportDocument', { documentID: this.activeID, printing: action === 'print', mode: this.reading ? 'read' : this.sourceEditing || this.active.textFile ? 'source' : 'edit' }); return true; }
     if (action === 'close') {
       const dialog = document.querySelector<HTMLDialogElement>('dialog[open]');
       if (dialog) { if (dialog.dispatchEvent(new Event('cancel', { cancelable: true }))) dialog.close(); return true; }
@@ -316,6 +430,11 @@ export class EditorApplication {
     if (action === 'replace' && this.reading) return false;
     if (action === 'find' || action === 'replace') { this.showFind(action === 'replace'); return true; }
     if (action === 'findNext' || action === 'findPrevious') { this.find(action === 'findPrevious'); return true; }
+    if(action==='copy'||action==='cut'){
+      if (this.reading) { const text = action === 'copy' && this.active?.textFile ? this.readerSelection() : ''; if (!text) return false; void this.copyContent(undefined, false, text, true); return true; }
+      if(this.reading||!this.view||!(this.view.hasFocus||tableHasFocus(this.view)||tableHasRange(this.view))||this.active?.imageLocked||this.active?.copyLocked)return false;
+      void this.copyContent(undefined,action==='cut');return true;
+    }
     if (this.reading) return false;
     if (action === 'paste') { if (!this.view || !(this.view.hasFocus || tableHasFocus(this.view))) return false; this.requestPaste(); return true; }
     if (!this.view || !(this.view.hasFocus || tableHasFocus(this.view))) {
@@ -323,13 +442,17 @@ export class EditorApplication {
       return false;
     }
     const item = this.active;
-    if (!item || item.imageLocked || item.closeLocked) return false;
+    if (!item || item.imageLocked || item.closeLocked ||item.copyLocked) return false;
     if (action === 'undo' || action === 'redo') { const cell = tableHasFocus(this.view); const result = action === 'undo' ? undo(this.view) : redo(this.view); if (cell) focusTableSelection(this.view); return result; }
     if (action === 'deleteLine' || action === 'deleteParagraph') {
+      const table=tableCopySelection(this.view);if(table){this.view.dispatch({changes:table.clear,userEvent:'delete.cells',annotations:isolateHistory.of('full')});return true;}
       if (tableHasFocus(this.view)) return deleteTableCell(this.view);
-      const spec = deletionTransaction(this.view.state, action); if (!spec) return false;
+      const state = this.view.state, line = state.doc.lineAt(state.selection.main.head);
+      const range = action === 'deleteParagraph' ? textParagraphRange(state) : { from: line.from, to: line.to };
+      const spec = item.textFile ? { changes: { ...range, to: range.to < state.doc.length ? range.to + 1 : range.to, insert: '' }, selection: EditorSelection.cursor(range.from), userEvent: 'delete.line' } : deletionTransaction(state, action); if (!spec) return false;
       this.view.dispatch({ ...spec, annotations: isolateHistory.of('full') }); return true;
     }
+    if (item.textFile && !['indent', 'outdent'].includes(action)) return false;
     const transaction = formatTransaction(this.view.state, action);
     if (!transaction) return false;
     const cell = tableHasFocus(this.view);
@@ -350,7 +473,13 @@ export class EditorApplication {
     byID('find-mode').textContent = (replace ? t('替换', 'Replace') : t('查找', 'Find')) + ' ⇄';
     byID('find-mode').setAttribute('aria-expanded', String(replace)); byID<HTMLButtonElement>('find-mode').disabled = this.reading;
   }
-  hideFind(): void { if (this.composing()) return; this.resetSearchRoom(); byID('find-panel').hidden = true; document.body.classList.remove('finding'); this.findGeneration++; this.highlights.clear(); if (!this.reading) this.view?.focus(); else byID('reader').focus({ preventScroll: true }); }
+  hideFind(): void {
+    if (this.composing()) return;
+    this.resetSearchRoom(); byID('find-panel').hidden = true; document.body.classList.remove('finding'); this.highlights.clear();
+    // Closing the panel changes layout, but does not cancel the user's destination. The
+    // in-flight positioning pass must still correct for CodeMirror's next height-map update.
+    if (!this.reading) this.view?.focus(); else byID('reader').focus({ preventScroll: true });
+  }
   find(backwards: boolean, fromStart = false): boolean {
     const item = this.active; if (!item || this.composing()) return false;
     const query = byID<HTMLInputElement>('query').value;
@@ -359,7 +488,7 @@ export class EditorApplication {
     if (match) {
       this.findOffset = backwards ? match.from : match.to;
       if (!this.reading) this.edit(item.id, { selection: EditorSelection.single(match.from, match.to) });
-      this.centerMatch(match.from, () => { if (generation === this.findGeneration) { const block = this.matchBlock(match.from); this.highlights.flash(block,block ? this.matchRect(block,match.from) : undefined); } });
+      this.centerMatch(match.from, () => { if (generation === this.findGeneration && !byID('find-panel').hidden) { const block = this.matchBlock(match.from); this.highlights.flash(block,block ? this.matchRect(block,match.from) : undefined); } });
     }
     this.updateFindCount(); return !!match;
   }
@@ -409,19 +538,25 @@ export class EditorApplication {
     }
     try { const at = this.view.domAtPos(position); return (at.node.nodeType === Node.ELEMENT_NODE ? at.node as Element : at.node.parentElement)?.closest<HTMLElement>('.cm-line,.live-table,.markdown-block') ?? undefined; } catch { return; }
   }
-  private centerMatch(position: number, complete: () => void): void {
+  private centerMatch(position: number, complete: () => void, immediate = false): void {
     if (this.reading) {
       const block = this.matchBlock(position), reader = byID('reader'); if (!block) return;
       const target = () => { const rect = this.matchRect(block,position) ?? block.getBoundingClientRect(); return reader.scrollTop + (rect.top+rect.bottom)/2 - reader.getBoundingClientRect().top - reader.clientHeight/2; };
-      this.ensureSearchRoom(target()); animateScroll(reader, target(), undefined, undefined, complete);
+      this.ensureSearchRoom(target()); animateScroll(reader, target(), undefined, immediate ? 0 : undefined, complete);
     } else if (this.view) {
-      const view = this.view, scroller = view.scrollDOM, id = this.activeID, generation = this.findGeneration;
-      const target = () => { if (generation !== this.findGeneration || position > view.state.doc.length) return scroller.scrollTop; const row = this.matchBlock(position), caret = row?.tagName === 'TR' ? row.getBoundingClientRect() : view.coordsAtPos(position), block = view.lineBlockAt(position); return caret ? scroller.scrollTop + (caret.top + caret.bottom) / 2 - scroller.getBoundingClientRect().top - scroller.clientHeight / 2 : view.documentTop + block.top + block.height / 2 - scroller.getBoundingClientRect().top + scroller.scrollTop - scroller.clientHeight / 2; };
-      this.ensureSearchRoom(target()); animateScroll(scroller, target(), undefined, undefined, () => {
-        if (this.activeID !== id || this.reading || generation !== this.findGeneration) return;
-        let finished = false; const finish = (top: number) => { if (finished || this.activeID !== id || this.reading || generation !== this.findGeneration) return; finished = true; animateScroll(scroller, top, undefined, 140, complete); };
-        view.requestMeasure({ read: target, write: finish }); window.setTimeout(() => { if (!finished) finish(target()); }, 80);
-      });
+      const view = this.view, scroller = view.scrollDOM, id = this.activeID, generation = this.findGeneration, selection = view.state.selection;
+      const current = () => this.activeID === id && !this.reading && generation === this.findGeneration && view.state.selection.main.head === selection.main.head;
+      const target = () => { if (!current() || position > view.state.doc.length) return scroller.scrollTop; const row = this.matchBlock(position), caret = row?.tagName === 'TR' ? row.getBoundingClientRect() : view.coordsAtPos(position), block = view.lineBlockAt(position); return caret ? scroller.scrollTop + (caret.top + caret.bottom) / 2 - scroller.getBoundingClientRect().top - scroller.clientHeight / 2 : view.documentTop + block.top + block.height / 2 - scroller.getBoundingClientRect().top + scroller.scrollTop - scroller.clientHeight / 2; };
+      this.pendingMatch = { view, position, run: () => {
+        if (!current()) return;
+        this.ensureSearchRoom(target()); animateScroll(scroller, target(), undefined, immediate ? 0 : undefined, () => {
+          if (!current()) return;
+          let finished = false; const finish = (top: number) => { if (finished || !current()) return; finished = true; animateScroll(scroller, top, undefined, immediate ? 0 : 140, complete); };
+          view.requestMeasure({ read: target, write: finish }); window.setTimeout(() => { if (!finished) finish(target()); }, 80);
+        });
+      } };
+      view.dispatch({ effects: EditorView.scrollIntoView(position, { y: 'center' }) });
+      view.coordsAtPos(position);
     }
   }
   private matchRect(block: HTMLElement, position: number): DOMRect | undefined {
@@ -446,9 +581,9 @@ export class EditorApplication {
 
   requestPaste(): boolean {
     const item = this.active;
-    if (!item || item.unsupported || this.reading || this.composing() || item.closeLocked || item.imageLocked) return false;
+    if (!item || item.unsupported || this.reading || this.composing() || item.closeLocked || item.imageLocked ||item.copyLocked) return false;
     if (this.pasteJob || item.saves.pending) { this.setNotice(t('请先等待当前图片任务或该文档保存完成', 'Wait for the current image task or document save to finish')); return false; }
-    const job: PasteJob = { id: newID(), documentID: item.id, revision: item.saves.revision, selection: item.state.selection, cancelRequested: false };
+    const job: PasteJob = { id: newID(), documentID: item.id, revision: item.saves.revision, selection: item.state.selection, cancelRequested: false,tableTarget:!!this.view&&(tableHasFocus(this.view)||tableHasRange(this.view)) };
     this.pasteJob = job; item.imageLocked = true; this.lock(item); this.renderChrome();
     this.post('paste', { documentID: item.id, requestID: job.id, revision: job.revision, anchor: job.selection.main.anchor, head: job.selection.main.head });
     return true;
@@ -457,19 +592,56 @@ export class EditorApplication {
     const job = this.pasteJob; if (!job) return;
     job.cancelRequested = true; this.post('cancelPaste', { documentID: job.documentID, requestID: job.id }); this.renderChrome();
   }
+  private resolvePaste(action:'retry'|'local'):void{const job=this.pasteJob;if(!job||!job.failure)return;job.failure=undefined;this.renderChrome();this.post('resolvePaste',{documentID:job.documentID,requestID:job.id,action});}
   private pasteReceipt(message: Record<string, unknown>): void {
     const job = this.pasteJob;
     if (!job || message.requestID !== job.id || message.documentID !== job.documentID) return;
     const item = this.documents.get(job.documentID);
+    if(message.canRetry===true&&!job.cancelRequested&&message.outcome==='failure'){job.failure=String(message.error);this.renderChrome();return;}
     this.pasteJob = null;
     if (!item) return;
     item.imageLocked = false; this.lock(item);
     if (message.outcome === 'success' && !job.cancelRequested && item.saves.revision === job.revision) {
-      const insert = typeof message.reference === 'string' ? `![${t('图片', 'Image')}](${message.reference})` : typeof message.text === 'string' ? message.text : '';
+      let insert = typeof message.reference === 'string' ? `![${t('图片', 'Image')}](${message.reference})` : typeof message.text === 'string' ? message.text : '';
+      if(job.tableTarget)insert=insert.replace(/\r\n?|\n/g,' ').replace(/(?<!\\)\|/g,'\\|');
       if (insert) this.edit(item.id, { changes: { from: job.selection.main.from, to: job.selection.main.to, insert },
         selection: EditorSelection.single(job.selection.main.from + insert.length), userEvent: 'input.paste', annotations: isolateHistory.of('full') });
     } else if (message.outcome === 'failure') this.notice = String(message.error || t('粘贴失败，正文未改变', 'Paste failed. The document is unchanged'));
     this.renderChrome();
+  }
+
+  private async copyContent(range?:SourceRange,cut=false,provided?:string,raw=false):Promise<void>{
+    const item=this.active;if(!item||item.unsupported||item.imageLocked||item.copyLocked||item.closeLocked||this.composing()||cut&&this.reading)return;
+    const state=item.state,before=state.doc,table=!range&&this.view?tableCopySelection(this.view):undefined;
+    const cell=!range&&provided===undefined&&!table&&this.view&&!this.sourceEditing&&!item.textFile?tableCellSelection(this.view):undefined;
+    if(cut&&!range&&provided===undefined&&!table&&state.selection.main.empty&&!cell?.selected)return;
+    if(cell)range={from:cell.from,to:cell.to};
+    if(!range&&provided===undefined&&!table){const selected=state.selection.main;range=selected.empty?(item.textFile?textParagraphRange(state):paragraphRange(state)):{from:selected.from,to:selected.to};}
+    raw ||= item.textFile || !!cell;
+    const markdown=provided??table?.markdown??(range?(item.textFile?state.sliceDoc(range.from,range.to):cell?inlinePlainText(state.sliceDoc(range.from,range.to),state.field(referenceIndex).context):copyMarkdown(state,range)):'');
+    if(!markdown)return;
+    if(new TextEncoder().encode(markdown).length>8*1_048_576){this.setNotice(t('复制内容超过 8 MiB，请缩小选区后重试。','The copied text exceeds 8 MiB. Select a smaller range and try again.'));return;}
+    item.copyLocked=true;this.lock(item);const feedback=++this.copyFeedbackID;this.copyFeedback(t('正在复制…','Copying…'),feedback);
+    let ticket:string|undefined,timer=0;
+    try{
+      const reservation=await this.request('beginCopy',{documentID:item.id});if(reservation.outcome!=='success'||typeof reservation.ticket!=='string')throw new Error(t('复制未开始，请稍后重试。','Copy could not start. Please try again.'));ticket=reservation.ticket;
+      let removed=false;
+      const snapshot=raw?{html:'',resources:[],imageBindings:[]}:await Promise.race([exportHTML(markdown,item.id,()=>this.ensureMermaid()),new Promise<never>((_,reject)=>{timer=window.setTimeout(()=>reject(new Error(t('复制准备超时，请重试。','Copy preparation timed out. Please try again.'))),45000);})]);clearTimeout(timer);
+      if(!raw&&table?.syntheticHeader){const template=document.createElement('template');template.innerHTML=snapshot.html;template.content.querySelector('thead')?.remove();snapshot.html=template.innerHTML;}
+      const bytes=(text:string)=>new TextEncoder().encode(text).length;
+      if(bytes(snapshot.html)>32*1_048_576||snapshot.resources.length>512||snapshot.imageBindings.length>512||snapshot.resources.some(value=>bytes(value)>12_000)||snapshot.imageBindings.some(value=>bytes(value.source)>12_000||bytes(value.resource)>12_000))throw new Error(t('复制内容超过格式或资源上限，请缩小选区后重试。','The copied formatting or resources exceed the limit. Select a smaller range and try again.'));
+      const result=await this.request('copyFragment',{documentID:item.id,ticket,revision:item.saves.revision,markdown,snapshot,raw});
+      if(result.outcome!=='success')throw new Error(String(result.error||t('复制未完成','Copy did not finish')));
+      if(cut&&this.documents.has(item.id)&&item.state.doc===before){
+        const changes=table?table.clear:range?[{from:range.from,to:range.to,insert:''}]:[];
+        if(changes.length){item.copyLocked=false;this.lock(item);this.edit(item.id,{changes,selection:EditorSelection.cursor(Math.min(changes[0].from,before.length-(range?range.to-range.from:0))),userEvent:'delete.cut',annotations:isolateHistory.of('full')});removed=true;}
+      }
+      if (this.activeID === item.id) {
+        if(cut&&!removed){this.copyFeedback('',feedback);this.notice=t('已复制，剪切未执行。请重新选择后再试。','Copied. Cut was not applied; select the content and try again.');}
+        else this.copyFeedback(cut?t('已剪切','Cut'):t('已复制','Copied'),feedback,1200);
+      }
+    }catch(error){this.copyFeedback('',feedback);if(this.activeID===item.id)this.notice=String((error as Error).message||t('复制未完成','Copy did not finish'));}
+    finally{clearTimeout(timer);if(ticket)this.post('abortCopy',{documentID:item.id,ticket});if(this.documents.has(item.id)){item.copyLocked=false;this.lock(item);}this.renderChrome();}
   }
 
   private chooseClose(item: EditorDocument): Promise<'save' | 'discard' | 'cancel'> {
@@ -486,7 +658,7 @@ export class EditorApplication {
   }
   async closeTab(id: string): Promise<boolean> {
     const item = this.documents.get(id);
-    if (!item || this.closing || item.imageLocked || this.composing()) return false;
+    if (!item || this.closing || item.imageLocked ||item.copyLocked|| this.composing()) return false;
     this.closing = true;
     try {
       if (id === this.activeID) this.rememberPosition();
@@ -509,7 +681,7 @@ export class EditorApplication {
   private async closeAll(requestID: string): Promise<void> {
     this.rememberPosition();
     let permitted = false;
-    if (!this.closing && !this.pasteJob && !this.composing()) {
+    if (!this.closing && !this.pasteJob && ![...this.documents.values()].some(item=>item.copyLocked) && !this.composing()) {
       this.closing = true;
       const ids = [...this.documents.keys()];
       permitted = await protectCloseAll([...this.documents.values()].map(item => item.saves), machine => this.chooseClose(this.documents.get(machine.documentID)!));
@@ -533,12 +705,13 @@ export class EditorApplication {
     for (const image of element.querySelectorAll<HTMLImageElement>('img')) {
       // Reading is a complete local render; do not leave document images waiting on editor viewport activity.
       image.loading = this.reading ? 'eager' : 'lazy';
-      image.onerror = () => { this.diagnostic('imageFailure'); image.classList.add('image-error'); image.title = t('本地图片不可用或超出文档权限', 'Local image is unavailable or outside document permissions'); };
+      image.onerror = () => { this.diagnostic('imageFailure'); image.classList.add('image-error'); image.title = t('图片暂不可用，请检查资源或存储访问设置。', 'Image unavailable. Check the resource or storage access settings.'); };
       const size = () => {
-        if (image.naturalWidth > 0) { image.style.setProperty('--image-width', image.naturalWidth + 'px'); image.style.width = 'calc(var(--image-width) * var(--content-zoom))'; }
+        this.imageControls.fit(image);
         this.view?.requestMeasure();
       };
       image.onload = size; if (image.complete) size();
+      this.imageControls.bind(image,documentID);
     }
     for (const diagram of element.querySelectorAll<HTMLElement>('[data-diagram]')) {
       const source = diagram.dataset.diagram!, token = newID(); diagram.dataset.renderToken = token;
@@ -565,12 +738,12 @@ export class EditorApplication {
   }
   private updateCount(): void {
     const item = this.active;
-    byID('count').textContent = item && !item.unsupported ? `${item.state.doc.length.toLocaleString()} ${t('字符', 'characters')} · ${item.state.doc.lines} ${t('行', 'lines')}` : item ? '—' : 'Markdown · UTF-8';
+    byID('count').textContent = item && !item.unsupported ? `${item.state.doc.length.toLocaleString()} ${t('字符', 'characters')} · ${item.state.doc.lines} ${t('行', 'lines')}${item.textFile ? ' · '+item.encoding : ''}` : item ? '—' : 'Markdown · UTF-8';
     byID('zoom-button').textContent = `${Math.round(this.zoom * 100)}%`;
     this.updateFindCount();
   }
   private toggleOutline(): void {
-    if (this.reading || !this.active || this.active.unsupported) return;
+    if (this.reading || !this.active || this.active.unsupported || this.active.textFile) return;
     this.outlineHidden = !this.outlineHidden;
     clearTimeout(this.outlineTimer);
     if (this.outlineHidden) {
@@ -589,9 +762,17 @@ export class EditorApplication {
     byID('toggle-outline').setAttribute('aria-expanded', String(!this.outlineHidden));
     this.view?.requestMeasure();
   }
+  private toggleFiles(): void {
+    if (this.reading || !this.workspaceBrowser.root) return;
+    this.filesHidden = !this.filesHidden;
+    byID('files-panel').classList.toggle('collapsed', this.filesHidden);
+    byID('files-content').inert = this.filesHidden;
+    byID('toggle-files').setAttribute('aria-expanded', String(!this.filesHidden));
+    this.view?.requestMeasure();
+  }
   private scheduleHint(): void {
     clearTimeout(this.hintTimer); byID('format-hint').textContent = '';
-    if (this.reading || !this.preferences.shortcutHints || !this.view || this.composing()) return;
+    if (this.reading || this.active?.textFile || !this.preferences.shortcutHints || !this.view || this.composing()) return;
     this.hintTimer = window.setTimeout(() => {
       if (this.view && !this.composing() && (this.view.hasFocus || tableHasFocus(this.view))) byID('format-hint').textContent = formatContext(this.view.state);
     }, 450);
@@ -599,7 +780,7 @@ export class EditorApplication {
   private renderOutline(): void {
     const tree = byID('outline-tree'); tree.replaceChildren();
     const item = this.active;
-    if (!item) { byID('outline-empty').hidden = false; return; }
+    if (!item || item.textFile || item.unsupported) { byID('outline-empty').hidden = false; return; }
     const headings = item.state.field(documentOutline), collapsed = this.collapsed.get(item.id) ?? new Set<number>();
     this.collapsed.set(item.id, collapsed);
     byID('outline-empty').hidden = headings.length > 0;
@@ -616,9 +797,18 @@ export class EditorApplication {
         if (heading.children.length) row.setAttribute('aria-expanded', String(!collapsed.has(heading.from)));
         toggle.onclick = () => { if (collapsed.has(heading.from)) collapsed.delete(heading.from); else collapsed.add(heading.from); this.renderOutline(); };
         const link = document.createElement('button'); link.className = 'outline-link'; link.textContent = heading.title; link.title = heading.title;
+        line.oncontextmenu=event=>{
+          event.preventDefault();if(this.composing())return;const original=item.state.doc;
+          const current=()=>this.activeID===item.id&&item.state.doc===original&&!item.imageLocked&&!item.copyLocked&&!item.closeLocked;
+          const range=chapterRange(item.state,headings,heading.from);if(!range)return;
+          const actions=[{label:t('复制','Copy'),disabled:!current(),run:()=>{if(current())void this.copyContent(range);}}];
+          if(!this.reading)actions.push({label:t('剪切','Cut'),disabled:!current(),run:()=>{if(current())void this.copyContent(range,true);}}, {label:t('删除','Delete'),disabled:!current(),run:()=>{if(current())this.edit(item.id,{changes:{...range,insert:''},selection:EditorSelection.cursor(range.from),userEvent:'delete.chapter',annotations:isolateHistory.of('full')});}});
+          contextMenu(event.clientX,event.clientY,actions,'outline-menu');
+        };
         link.onmousedown = event => { if (event.button === 0) event.preventDefault(); };
         link.onclick = () => {
           if (this.composing() || !this.view) return;
+          this.documentTransition.cancel();
           this.positionJump++; this.findGeneration++;
           if (this.reading) {
             const line = item.state.doc.lineAt(heading.from).number - 1;
@@ -646,26 +836,33 @@ export class EditorApplication {
       select.onclick = () => this.activate(item.id);
       select.ondblclick = () => this.pin(item);
       const close = document.createElement('button'); close.type = 'button'; close.className = 'close-tab'; close.textContent = '×'; close.setAttribute('aria-label', `${t('关闭', 'Close')} ${this.displayTitle(item)}`);
-      close.onclick = () => { void this.closeTab(item.id); }; close.disabled = item.imageLocked || item.closeLocked;
+      close.onclick = () => { void this.closeTab(item.id); }; close.disabled = item.imageLocked || item.closeLocked ||item.copyLocked;
       row.append(select, close); tabs.append(row);
     }
     const item = this.active;
+    document.body.classList.toggle('text-file', !!item?.textFile);
     document.body.classList.toggle('no-document', !item || item.unsupported);
-    byID('outline-panel').hidden = !item || item.unsupported;
-    byID('toggle-outline').hidden = !item || item.unsupported;
+    byID('outline-panel').hidden = !item || item.unsupported || item.textFile;
+    byID('toggle-outline').hidden = !item || item.unsupported || item.textFile;
+    byID('toggle-files').hidden = !this.workspaceBrowser.root;
+    byID('toggle-files').setAttribute('aria-expanded', String(!this.filesHidden));
+    byID('files-content').inert = this.filesHidden || this.reading;
     byID('recent-panel').hidden = !!item || !!this.workspaceBrowser.root;
     byID('empty').hidden = !!item;
     if (!item && !this.wasEmpty) renderEmptyState(true); this.wasEmpty = !item;
     byID<HTMLButtonElement>('toggle-reading').disabled = !item || item.unsupported;
-    byID<HTMLButtonElement>('toggle-source').disabled = !item || item.unsupported;
+    byID<HTMLButtonElement>('toggle-source').disabled = !item || item.unsupported || item.textFile;
     byID<HTMLButtonElement>('zoom-button').disabled = !item || item.unsupported;
     byID('toggle-source').setAttribute('aria-pressed', String(this.sourceEditing));
     byID('unsupported').hidden = !item?.unsupported; byID('unsupported-name').textContent = item?.unsupported ? item.title : '';
     byID('editor').hidden = this.reading || !!item?.unsupported;
-    byID('document-title').textContent = item ? this.displayTitle(item) : '';
+    const title = byID('document-title');
+    title.replaceChildren();
+    if (item) { const name = document.createElement('span'); name.className = 'document-name'; name.textContent = this.displayTitle(item); title.append(fileIcon(item.textFile ? item.language ? 'code' : 'text' : 'markdown'), name); }
     byID('notice').hidden = !this.notice; byID('notice-text').textContent = this.notice;
     byID('paste-progress').hidden = !this.pasteJob;
-    if (this.pasteJob) byID('paste-label').textContent = `${this.pasteJob.cancelRequested ? t('正在取消', 'Cancelling') : t('正在粘贴图片', 'Pasting image')}… · ${this.documents.get(this.pasteJob.documentID)?.title ?? ''}`;
+    if (this.pasteJob) byID('paste-label').textContent = this.pasteJob.failure??`${this.pasteJob.cancelRequested ? t('正在取消', 'Cancelling') : t('正在粘贴图片', 'Pasting image')}… · ${this.documents.get(this.pasteJob.documentID)?.title ?? ''}`;
+    byID('retry-paste').hidden=byID('local-paste').hidden=!this.pasteJob?.failure;
     const labels = { loaded: '已打开', saving: '正在保存 · 可以继续输入', saved: '已保存', failure: '保存失败 · 编辑已保留', cancelled: '保存已取消', conflict: '检测到外部变更 · 未覆盖', unconfirmed: '保存结果未确认 · 请保留文档' };
     const english = { loaded: 'Opened', saving: 'Saving · You can keep typing', saved: 'Saved', failure: 'Save failed · Edits retained', cancelled: 'Save cancelled', conflict: 'External changes detected · Not overwritten', unconfirmed: 'Save unconfirmed · Keep this document open' };
     byID('status').textContent = item ? item.saves.error || `${t(labels[item.saves.state], english[item.saves.state])}${item.saves.dirty ? t(' · 有未保存修改', ' · Unsaved changes') : ''}${item.savedAt ? ' · ' + formatTimestamp(item.savedAt, this.preferences.timeZone) : ''}` : t('创建或打开 Markdown 文档', 'Create or open a Markdown document');
@@ -674,6 +871,11 @@ export class EditorApplication {
   receive(message: Record<string, unknown>): boolean {
     if (message.protocolVersion !== 1 || message.sessionID !== context.sessionID) return false;
     const kind = message.kind;
+    if(kind==='imageStorage'){
+      const value=message.value as {prefixes?:unknown}|undefined;configureImageSources(value?.prefixes);
+      for(const item of this.documents.values())this.edit(item.id,{effects:preferencesEffect.of(this.preferences)});
+      this.readingDocument=undefined;if(this.reading)this.renderReading();return true;
+    }
     if (kind === 'recentLocations') { this.renderRecent((message.items ?? []) as { id: string; name: string; path: string }[]); return true; }
     if (kind === 'clearPositions') { for (const item of this.documents.values()) item.resume = undefined; this.dismissResume(); return true; }
     if (this.workspaceBrowser.receive(message)) { if (kind === 'workspace') { this.latestOpenRequest = ''; this.openRequests.clear(); this.cleanupStalePreviews(''); } return true; }
@@ -686,7 +888,7 @@ export class EditorApplication {
       const request = String(message.openRequestID ?? ''); if (request && request !== this.latestOpenRequest) return true;
       this.stalePreviewIDs.delete(String(message.documentID));
       const item = this.documents.get(String(message.documentID)); if (item && message.pin === true) this.pin(item);
-      this.activate(String(message.documentID)); this.finishWorkspaceOpen(request, String(message.documentID));
+      this.activateOpenedDocument(String(message.documentID), message.fragment, request); this.finishWorkspaceOpen(request, String(message.documentID));
     }
     else if (kind === 'initialReady') {
       if (!this.reading) this.view?.focus();
@@ -702,11 +904,12 @@ export class EditorApplication {
       }
       item.saves.receive(message); this.renderChrome();
     } else if (kind === 'pasteReceipt') this.pasteReceipt(message);
-    else if (kind === 'closeReceipt') {
+    else if (kind === 'closeReceipt'||kind==='copyReceipt'||kind==='beginCopyReceipt') {
       const id = String(message.requestID), resolve = this.requests.get(id); this.requests.delete(id); resolve?.(message);
     } else if (kind === 'closeAllReceipt') {
       const permitted = message.permitted === true;
       if (permitted) {
+        this.documentTransition.cancel();
         for (const item of this.documents.values()) { item.unsubscribe(); item.saves.dispose(); }
         this.documents.clear(); this.stalePreviewIDs.clear(); this.activeID = ''; this.view?.destroy(); this.view = null; byID('editor').replaceChildren();
       }
@@ -716,7 +919,11 @@ export class EditorApplication {
     else if (kind === 'mermaidFailed') this.mermaidReject?.(new Error(String(message.error || t('离线图表加载失败', 'Offline diagram failed to load'))));
     else if (kind === 'notice') this.setNotice(String(message.text));
     else if (kind === 'hostCommand') {
-      if (message.action === 'zoom' && typeof message.factor === 'number') { if (this.diagramViewer.open) this.diagramViewer.zoom(message.factor); else this.zoomBy(message.factor); return true; }
+      if (message.action === 'zoom' && typeof message.factor === 'number') {
+        if (this.diagramViewer.open) this.diagramViewer.zoom(message.factor);
+        else if (!document.querySelector('dialog[open]')) this.zoomBy(message.factor);
+        return true;
+      }
       if (message.action === 'closeAll') { void this.closeAll(String(message.requestID)); return true; }
       return this.command(String(message.action));
     }
@@ -725,6 +932,7 @@ export class EditorApplication {
   private applyPreferences(value: unknown): void {
     const before = this.preferences;
     this.preferences = normalizePreferences(value, this.preferences);
+    byID<HTMLInputElement>('show-workspace-recents').checked = this.preferences.showWorkspaceRecents;
     setLanguage(this.preferences.locale); localizePage(); renderEmptyState();
     if (before.focusMode !== this.preferences.focusMode || before.lineNumbers !== this.preferences.lineNumbers || before.shortcutHints !== this.preferences.shortcutHints || before.locale !== this.preferences.locale)
       for (const item of this.documents.values()) this.edit(item.id, { effects: preferencesEffect.of(this.preferences) });
@@ -733,7 +941,7 @@ export class EditorApplication {
     if (fonts.textContent !== rules) fonts.textContent = rules;
     this.workspaceBrowser.setPreferences(this.preferences.showAllFiles, this.preferences.timeZone); this.moveOutline(this.preferences.outlineSide, before.outlineSide !== this.preferences.outlineSide);
     this.moveNavigation(byID('files-panel'), this.preferences.filesSide, before.filesSide !== this.preferences.filesSide);
-    this.applyLayout(); this.renderChrome(); if (this.reading) this.renderReading(); else this.scheduleCenter();
+    this.applyLayout(); this.renderChrome(); if (this.reading) this.renderReading(); else if (Object.entries(this.preferences).some(([key, value]) => key !== 'showWorkspaceRecents' && value !== before[key as keyof typeof before])) this.scheduleCenter();
   }
   private displayTitle(item: EditorDocument): string { return item.path ? item.title : t('未命名', 'Untitled'); }
   private persistPreference(key: string, value: unknown, delay = 0): void {
@@ -753,31 +961,34 @@ export class EditorApplication {
     const root = document.documentElement;
     for (const side of ['left', 'right'] as const) {
       const width = this.preferences[side === 'left' ? 'leftWidth' : 'rightWidth'];
-      byID(side + '-navigation').style.setProperty('--outline-width', `${width}px`); byID(side + '-resize').setAttribute('aria-valuenow', String(width));
+      const navigation = byID(side + '-navigation'); navigation.style.setProperty('--outline-width', `${width}px`);
+      byID(side + '-resize').setAttribute('aria-valuenow', String(navigation.getBoundingClientRect().width || width));
     }
     root.style.setProperty('--outline-width', `${this.preferences[this.preferences.outlineSide === 'left' ? 'leftWidth' : 'rightWidth']}px`);
     root.style.setProperty('--content-zoom', String(this.zoom)); root.style.setProperty('--editor-height', `${byID('main').clientHeight}px`);
     root.style.setProperty('--line-spacing', String(this.preferences[this.reading ? 'readLineSpacing' : 'editLineSpacing']));
-    root.style.setProperty('--body-line-height', String((this.reading || this.sourceEditing ? bodyLineHeight : editingLineHeight) * this.preferences[this.reading ? 'readLineSpacing' : 'editLineSpacing']));
+    root.style.setProperty('--body-line-height', String((this.reading || this.sourceEditing || this.active?.textFile ? bodyLineHeight : editingLineHeight) * this.preferences[this.reading ? 'readLineSpacing' : 'editLineSpacing']));
     root.dataset.appearance = this.preferences.appearance === 'system' ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light') : this.preferences.appearance;
     root.dataset.theme = this.preferences[this.reading ? 'readTheme' : 'editTheme'];
     root.dataset.outlineSide = this.preferences.outlineSide;
     document.body.classList.toggle('line-numbers-on', this.preferences.lineNumbers); document.body.classList.toggle('source-mode', this.sourceEditing);
     byID('reader').classList.toggle('reader-line-numbers', this.preferences.lineNumbers); this.view?.requestMeasure();
+    this.imageControls.refresh();
   }
   private scheduleCenter(): void {
-    if (this.reading || this.pointerSelecting || this.composing() || this.centerFrame) return;
+    if (this.reading || this.pointerSelecting || this.composing() || this.centerFrame ||this.view&&tableHasRange(this.view)) return;
     this.centerFrame = requestAnimationFrame(() => { this.centerFrame = 0; if (this.view && !this.reading && !this.pointerSelecting && !this.composing()) centerCaret(this.view); });
   }
   setReading(enabled: boolean): void {
     if (enabled === this.reading || this.composing() || enabled && (!this.active || this.active.unsupported || this.pasteJob)) return;
+    this.documentTransition.cancel();
     this.rememberPosition(); this.resetSearchRoom(); this.positionJump++; this.findGeneration++; this.highlights.clear();
     if (enabled) {
       this.pin(this.active!);
       this.outlineBeforeReading = this.outlineHidden;
-      if (this.outlineHidden) this.toggleOutline();
+      if (this.outlineHidden && !this.active?.textFile) this.toggleOutline();
       this.readingPosition = this.active!.state.selection.main.head;
-      if (this.view) { this.active!.scroll = this.view.scrollSnapshot(); stopScroll(this.view.scrollDOM); }
+      if (this.view) { this.active!.scroll = this.viewportSnapshot(); this.active!.scrollLeft = this.view.scrollDOM.scrollLeft; stopScroll(this.view.scrollDOM); }
       byID('find-panel').hidden = true;
       document.body.classList.remove('finding');
       if (document.activeElement instanceof HTMLElement) document.activeElement.blur(); getSelection()?.removeAllRanges();
@@ -793,22 +1004,53 @@ export class EditorApplication {
       if (this.outlineBeforeReading && !this.outlineHidden) this.toggleOutline();
       this.view?.focus(); this.scheduleCenter();
     }
-    this.renderChrome(); this.post('readingMode', { enabled });
+    this.renderChrome();
+    if (!enabled && this.view) this.view.coordsAtPos(this.view.state.selection.main.head);
+    this.post('readingMode', { enabled });
   }
   private renderReading(): void {
     const item = this.active; if (!item || !this.reading) return;
     if (this.readingDocument === item.state.doc && this.readingID === item.id && this.readingLocale === this.preferences.locale) return;
     this.readingDocument = item.state.doc; this.readingID = item.id; this.readingLocale = this.preferences.locale;
-    const content = byID('reader-content'); content.innerHTML = renderBlock(item.state.doc.toString(), item.id);
+    const content = byID('reader-content');
+    content.classList.toggle('text-preview', item.textFile);
+    if (item.textFile) { content.replaceChildren(renderText(item.state.doc.toString(), item.language)); return; }
+    content.innerHTML = renderBlock(item.state.doc.toString(), item.id);
     for (const node of content.querySelectorAll<HTMLElement>('[data-source-line]')) node.dataset.line = String(Number(node.dataset.sourceLine) + 1);
-    const slugs = new Map<string, number>();
-    for (const heading of content.querySelectorAll<HTMLElement>('h1,h2,h3,h4,h5,h6')) {
-      const base = (heading.textContent ?? '').toLowerCase().replace(/[^\p{L}\p{N}\s_-]/gu, '').replace(/\s+/g, '-');
-      const count = slugs.get(base) ?? 0; heading.id = base + (count ? '-' + count : ''); slugs.set(base, count + 1);
+    for (const heading of headingTargets(item.state.doc.toString())) {
+      const element = content.querySelector<HTMLElement>(`h${heading.level}[data-source-line="${heading.line}"]`);
+      if (element) element.id = heading.id;
     }
     this.hydrate(content, item.id);
   }
+  private async navigateFragment(fragment: string, immediate = false, reveal: () => void = () => {}): Promise<void> {
+    if (!immediate) this.documentTransition.cancel();
+    const item = this.active; if (!item || item.unsupported || !this.view || this.composing()) { reveal(); return; }
+    const id = decodeFragment(fragment);
+    const heading = id === null || id === '' ? undefined : headingTargets(item.state.doc.toString()).find(heading => heading.id === id);
+    if (id === null || id !== '' && !heading) { this.setNotice(t('未找到链接指向的章节。', 'The linked section was not found.')); reveal(); return; }
+    this.dismissResume(); this.pin(item); this.positionJump++; this.findGeneration++;
+    if (!this.reading) {
+      const position = heading ? item.state.doc.line(heading.line + 1).from : 0;
+      this.view.dispatch({ selection: EditorSelection.cursor(position) });
+      cancelAnimationFrame(this.centerFrame); this.centerFrame = 0;
+      this.view.focus(); this.centerMatch(position, reveal, immediate); return;
+    }
+    this.renderReading();
+    const reader = byID('reader'), content = byID('reader-content'), jump = this.positionJump, source = item.state.doc;
+    const target = heading ? content.querySelector<HTMLElement>(`h${heading.level}[data-source-line="${heading.line}"]`) : content;
+    if (!target) { reveal(); return; }
+    const scroll = () => animateScroll(reader, heading ? reader.scrollTop + target.getBoundingClientRect().top - reader.getBoundingClientRect().top - 40 : 0, undefined, immediate ? 0 : undefined);
+    scroll(); reveal();
+    // Correct for local images/fonts/diagrams above the chapter, but never override a
+    // subsequent wheel, tab, mode, find or TOC action while those resources finish.
+    let timer = 0;
+    const resources = Promise.all([document.fonts.ready, ...[...content.querySelectorAll('img')].map(image => image.decode().catch(() => {})), ...[...content.querySelectorAll<HTMLElement>('[data-diagram]')].map(diagram => this.diagramPromises.get(diagram))]);
+    const ready = await Promise.race([resources.then(() => true), new Promise<boolean>(resolve => { timer = window.setTimeout(() => resolve(false), 5000); })]); clearTimeout(timer);
+    if (ready && this.activeID === item.id && this.reading && item.state.doc === source && this.positionJump === jump) scroll();
+  }
   private scrollReaderTo(element: HTMLElement): void {
+    this.documentTransition.cancel();
     this.positionJump++; this.findGeneration++;
     const reader = byID('reader'); animateScroll(reader, reader.scrollTop + element.getBoundingClientRect().top - reader.getBoundingClientRect().top - 40);
   }
@@ -849,10 +1091,11 @@ export class EditorApplication {
     });
   }
   private toggleSource(): void {
-    if (!this.active || this.active.unsupported || this.composing()) return;
+    if (!this.active || this.active.unsupported || this.active.textFile || this.composing()) return;
+    this.documentTransition.cancel();
     const enabled = this.reading ? true : !this.sourceEditing; if (this.reading) this.setReading(false);
     this.sourceEditing = enabled;
-    for (const item of this.documents.values()) this.edit(item.id, { effects: [sourceModeEffect.of(enabled), item.sourceStyles.reconfigure(enabled ? syntaxHighlighting(defaultHighlightStyle) : [])] });
+    for (const item of this.documents.values()) this.edit(item.id, { effects: [sourceModeEffect.of(enabled), item.sourceStyles.reconfigure(enabled && !item.textFile ? syntaxHighlighting(defaultHighlightStyle) : [])] });
     this.applyLayout(); this.renderChrome(); this.view?.focus();
   }
   private moveOutline(side: 'left' | 'right', animate: boolean): void {
@@ -911,9 +1154,9 @@ export class EditorApplication {
   }
   async exportSnapshot(id: string): Promise<{ html: string; resources: string[] }> {
     const item = this.documents.get(id); if (!item || item.unsupported || item.imageLocked || this.composing()) throw new Error(t('当前文档暂时无法导出', 'The document cannot be exported right now'));
-    return exportHTML(item.state.doc.toString(), id, () => this.ensureMermaid());
+    return item.textFile ? textSnapshot(item.state.doc.toString()) : exportHTML(item.state.doc.toString(), id, () => this.ensureMermaid());
   }
 }
 const application = new EditorApplication();
-globalThis.markfine = { receive: message => application.receive(message), prepareSnapshot: migrateImageReferences, stagedReferences, exportSnapshot: id => application.exportSnapshot(id) };
+globalThis.markfine = { receive: message => application.receive(message), prepareSnapshot: migrateImageReferences, stagedReferences,imageSources,replaceImageDestinations, exportSnapshot: id => application.exportSnapshot(id) };
 application.post('ready');

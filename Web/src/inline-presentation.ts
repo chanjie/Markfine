@@ -1,8 +1,22 @@
 import { StateField, type EditorState } from '@codemirror/state';
-import { syntaxTree } from '@codemirror/language';
+import { ensureSyntaxTree, syntaxTree } from '@codemirror/language';
 import { Decoration, EditorView, type DecorationSet } from '@codemirror/view';
 import type { Tree } from '@lezer/common';
 import { emptyReferences, linkTarget, type ReferenceContext } from './renderer';
+
+/** Resolve a modifier-click in source mode without adding presentation decorations. */
+export function sourceLinkTarget(state: EditorState, position: number, context: ReferenceContext = emptyReferences): string | null {
+  if (position < 0 || position > state.doc.length) return null;
+  const tree = ensureSyntaxTree(state, Math.min(state.doc.length, position + 1), 20) ?? syntaxTree(state);
+  let link: { from: number; to: number } | undefined;
+  for (let node = tree.resolveInner(position, 1); ; ) {
+    if (['Image', 'InlineCode', 'FencedCode', 'CodeBlock'].includes(node.name)) return null;
+    if (!link && (node.name === 'Link' || node.name === 'Autolink')) link = node;
+    if (!node.parent) break;
+    node = node.parent;
+  }
+  return link ? linkTarget(state.sliceDoc(link.from, link.to), context) : null;
+}
 
 /** The same inline presentation is used in paragraphs and table cell editors. Source is never rewritten. */
 export function inlineDecorations(state: EditorState, tree: Tree, from: number, to: number, context: ReferenceContext = emptyReferences): ReturnType<Decoration['range']>[] {
