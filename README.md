@@ -1,5 +1,7 @@
 # Markfine
 
+[简体中文](README.md) | [English](README.en.md)
+
 一款小巧、流畅的 macOS Markdown 编辑器，为专注写作与沉浸阅读而设计。
 
 ## 设计理念

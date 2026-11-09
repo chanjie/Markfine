@@ -72,6 +72,17 @@ const controllers = new WeakMap<HTMLElement, TableController>();
 export function tableCopySelection(view:EditorView):TableCopy|undefined { for(const element of view.dom.querySelectorAll<HTMLElement>('.live-table')){const value=controllers.get(element)?.copySelection();if(value)return value;} }
 export function tableHasRange(view:EditorView):boolean{for(const element of view.dom.querySelectorAll<HTMLElement>('.live-table'))if(controllers.get(element)?.hasRange)return true;return false;}
 export function tableCellSelection(view:EditorView):{from:number;to:number;selected:boolean}|undefined{for(const element of view.dom.querySelectorAll<HTMLElement>('.live-table')){const value=controllers.get(element)?.textSelection();if(value)return value;}}
+/** Read-only cell views and local source ranges for transient copy feedback. */
+export function tableTextViews(view: EditorView, from: number, to: number): { view: EditorView; from: number; to: number }[] {
+  const targets: { view: EditorView; from: number; to: number }[] = [];
+  for (const element of view.dom.querySelectorAll<HTMLElement>('.live-table')) {
+    const controller = controllers.get(element); if (!controller) continue;
+    controller.rows.flatMap(row => row.cells).forEach((cell, index) => {
+      if (cell.from < to && cell.to > from) targets.push({ view: controller.views[index], from: Math.max(from, cell.from) - cell.from, to: Math.min(to, cell.to) - cell.from });
+    });
+  }
+  return targets;
+}
 export function tableHasFocus(view: EditorView): boolean { return !!view.dom.querySelector('.table-cell-editor.cm-focused'); }
 export function deleteTableCell(view: EditorView): boolean {
   for (const element of view.dom.querySelectorAll<HTMLElement>('.live-table')) if (controllers.get(element)?.deleteFocusedCell()) return true;

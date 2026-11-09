@@ -26,6 +26,7 @@ import { DiagramViewer } from './diagram-viewer';
 import { replaceablePreview } from './preview-state';
 import { tabLabel, closeTargets, showTabMenu, installReadingTabs, pathTooltip, type TabCloseScope } from './tab-navigation';
 import { SearchHighlights } from './search-highlights';
+import { CopyHighlight } from './copy-highlight';
 import { exportHTML } from './document-output';
 import { fileIcon } from './file-icons';
 import { decodeFragment, headingTargets } from './heading-navigation';
@@ -105,6 +106,7 @@ export class EditorApplication {
   private findOffset = 0;
   private searchRoom = 0;
   private readonly highlights = new SearchHighlights(() => byID(this.reading ? 'reader-content' : 'editor'));
+  private readonly copyHighlight = new CopyHighlight();
   private diagnostics = new Map<string, number>();
   private readonly documentTransition = new DocumentTransition(byID('main'), byID('document-title'));
   private readonly imageControls=new ImageControls({source:id=>this.documents.get(id)?.state.doc.toString(),canEdit:id=>this.activeID===id&&!this.reading&&!this.composing()&&!this.documents.get(id)?.imageLocked&&!this.documents.get(id)?.copyLocked&&!this.closing,zoom:()=>this.zoom,change:(id,change)=>{this.edit(id,{changes:change,annotations:isolateHistory.of('full'),userEvent:'input.imageSize'});},measure:()=>this.view?.requestMeasure()});
@@ -313,6 +315,7 @@ export class EditorApplication {
       EditorView.updateListener.of(update => {
         const item = this.documents.get(id); if (!item) return;
         item.state = update.state;
+        if (update.docChanged || update.selectionSet) this.copyHighlight.clear();
         if (update.docChanged && this.collapsed.has(id)) this.collapsed.set(id, new Set([...this.collapsed.get(id)!].map(from => update.changes.mapPos(from))));
         if (update.docChanged) {
           this.findGeneration++; if (this.view) stopScroll(this.view.scrollDOM);
@@ -355,6 +358,7 @@ export class EditorApplication {
     if (next.closeLocked) return false;
     this.documentTransition.cancel();
     if (id === this.activeID) return true;
+    this.copyHighlight.clear();
     this.copyFeedback('', this.copyFeedbackID); this.copyFeedbackID++;
     this.rememberPosition(); this.resetSearchRoom(); this.dismissResume(); this.findGeneration++; this.positionJump++; this.pendingMatch = undefined;
     if (next.unsupported && this.reading) this.setReading(false);
@@ -621,15 +625,17 @@ export class EditorApplication {
   private async copyContent(range?:SourceRange,cut=false,provided?:string,raw=false):Promise<void>{
     const item=this.active;if(!item||item.unsupported||item.imageLocked||item.copyLocked||item.closeLocked||this.composing()||cut&&this.reading)return;
     const state=item.state,before=state.doc,table=!range&&this.view?tableCopySelection(this.view):undefined;
+    const implicitRange=range===undefined&&provided===undefined;
     const cell=!range&&provided===undefined&&!table&&this.view&&!this.sourceEditing&&!item.textFile?tableCellSelection(this.view):undefined;
     if(cut&&!range&&provided===undefined&&!table&&state.selection.main.empty&&!cell?.selected)return;
     if(cell)range={from:cell.from,to:cell.to};
     if(!range&&provided===undefined&&!table){const selected=state.selection.main;range=selected.empty?(item.textFile?textParagraphRange(state):paragraphRange(state)):{from:selected.from,to:selected.to};}
+    const flashRange=implicitRange&&!cut&&!table&&provided===undefined&&(cell?!cell.selected:state.selection.main.empty)?range:undefined;
     raw ||= item.textFile || !!cell;
     const markdown=provided??table?.markdown??(range?(item.textFile?state.sliceDoc(range.from,range.to):cell?inlinePlainText(state.sliceDoc(range.from,range.to),state.field(referenceIndex).context):copyMarkdown(state,range)):'');
     if(!markdown)return;
     if(new TextEncoder().encode(markdown).length>8*1_048_576){this.setNotice(t('复制内容超过 8 MiB，请缩小选区后重试。','The copied text exceeds 8 MiB. Select a smaller range and try again.'));return;}
-    item.copyLocked=true;this.lock(item);const feedback=++this.copyFeedbackID;this.copyFeedback(t('正在复制…','Copying…'),feedback);
+    this.copyHighlight.clear();item.copyLocked=true;this.lock(item);const feedback=++this.copyFeedbackID;this.copyFeedback(t('正在复制…','Copying…'),feedback);
     let ticket:string|undefined,timer=0;
     try{
       const reservation=await this.request('beginCopy',{documentID:item.id});if(reservation.outcome!=='success'||typeof reservation.ticket!=='string')throw new Error(t('复制未开始，请稍后重试。','Copy could not start. Please try again.'));ticket=reservation.ticket;
@@ -646,7 +652,10 @@ export class EditorApplication {
       }
       if (this.activeID === item.id) {
         if(cut&&!removed){this.copyFeedback('',feedback);this.notice=t('已复制，剪切未执行。请重新选择后再试。','Copied. Cut was not applied; select the content and try again.');}
-        else this.copyFeedback(cut?t('已剪切','Cut'):t('已复制','Copied'),feedback,1200);
+        else {
+          this.copyFeedback(cut?t('已剪切','Cut'):t('已复制','Copied'),feedback,1200);
+          if(flashRange&&this.view&&!this.reading&&item.state.doc===before)this.copyHighlight.show(this.view,flashRange);
+        }
       }
     }catch(error){this.copyFeedback('',feedback);if(this.activeID===item.id)this.notice=String((error as Error).message||t('复制未完成','Copy did not finish'));}
     finally{clearTimeout(timer);if(ticket)this.post('abortCopy',{documentID:item.id,ticket});if(this.documents.has(item.id)){item.copyLocked=false;this.lock(item);}this.renderChrome();}
@@ -938,6 +947,7 @@ export class EditorApplication {
     return true;
   }
   private applyPreferences(value: unknown): void {
+    this.copyHighlight.clear();
     const before = this.preferences;
     this.preferences = normalizePreferences(value, this.preferences);
     byID<HTMLInputElement>('show-workspace-recents').checked = this.preferences.showWorkspaceRecents;
@@ -989,6 +999,7 @@ export class EditorApplication {
   }
   setReading(enabled: boolean): void {
     if (enabled === this.reading || this.composing() || enabled && (!this.active || this.active.unsupported || this.pasteJob)) return;
+    this.copyHighlight.clear();
     this.documentTransition.cancel();
     this.rememberPosition(); this.resetSearchRoom(); this.positionJump++; this.findGeneration++; this.highlights.clear();
     if (enabled) {
@@ -1100,6 +1111,7 @@ export class EditorApplication {
   }
   private toggleSource(): void {
     if (!this.active || this.active.unsupported || this.active.textFile || this.composing()) return;
+    this.copyHighlight.clear();
     this.documentTransition.cancel();
     const enabled = this.reading ? true : !this.sourceEditing; if (this.reading) this.setReading(false);
     this.sourceEditing = enabled;

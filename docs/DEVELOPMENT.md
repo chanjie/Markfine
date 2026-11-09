@@ -54,6 +54,7 @@ python3 Scripts/release.py Dist/<最终构建目录>/<本次构建> --notes <本
 | `Sources/MarkfineCore/ReadingPositions.swift`、`RuntimeDataStore.swift` | 全局路径哈希导航元数据；描述符相对运行缓存清理与活跃会话锁，不管理文档资源 |
 | `Sources/MarkfineCore/DocumentExport.swift`、`Sources/Markfine/DocumentOutputController.swift` | 离线 OOXML ZIP 写出、独立静态排版 WebView、系统导出／打印面板 |
 | `Sources/Markfine/CacheCleanupController.swift`、`Web/src/tab-navigation.ts`、`search-highlights.ts` | 分类清理确认、标签导航与非侵入式匹配高亮 |
+| `Web/src/copy-highlight.ts` | 无选区复制成功后的可见文字覆盖层；只读DOM坐标，不改选区或正文 |
 | `Web/src/workspace-browser.ts`、`code-highlighting.ts`、`diagram-viewer.ts` | 文件树／临时预览交互、精确版本离线高亮、独立图表查看层 |
 | `Web/src/offline-policy.ts`、`file-icons.ts`、`deletion.ts`、`help.ts` | 依赖联网接口禁用、本地图标、源单位删除、分类快捷键与离线帮助 |
 | `Web/src/document-transition.ts` | 跨文档链接的短暂呈现动画；独立于章节滚动，响应用户取消与系统减少动态效果 |
@@ -99,7 +100,7 @@ python3 Scripts/release.py Dist/<最终构建目录>/<本次构建> --notes <本
 - `exportDocument(documentID,printing,mode)` 只由菜单／用户动作触发，`mode`仅接受edit／source／read以选择当前呈现对应的全局行距基准，不能接收任意排版值或路径。原生系统面板决定输出URL。原生调用 `exportSnapshot(id)` 获取 `{html,resources}`，图片仍经同文档 ImageStore 授权读取并经ImageIO尺寸预检和后台有界转换；独立非持久静态WebView通过DOM属性替换内嵌资源，不能正则扫描／全局替换文档文字。等待字体／图片／图表完成后输出。
 - DOCX以语义树生成OOXML和去重内嵌图片，只跨进程回传短图片ID及各图片的一份编码；编号先写全部abstractNum再写num。PDF不生成Word对象树，按可见文字行、图片／图表及表格行计算有限分页边界，再由WebKit逐区域生成保留文本的PDF、CoreGraphics合成带页边距的A4，不用整页截图替代正文。系统打印使用生成的PDF经PDFKit呼出面板，不直接循环WebKit的NSPrintOperation。
 - 输出安全上限：512图片引用、64MiB输入图片、96MiB转换PNG／32M累计像素、源图预检100M像素、输出栅格最长边2400px；PDF最多1000页、捕获128MiB、最终200MiB。不以截断内容冒充成功；超限或资源失败保护当前编辑及已有输出，输出原子写入。
-- `filesSide(left/right)` 与 `outlineSide` 独立。原生窗口自创建起使用固定的标准AppKit标题栏，不启用 `fullSizeContentView`，不在阅读切换中修改styleMask／窗口外框。Web内容始终位于原生标题栏下方，不再模拟32px标题栏或发送 `zoomWindow`；拖窗及双击系统偏好由AppKit处理。正文列宽直接按实际滚动视口用CSS约束，保留稳定滚动条留白，避免长短文档的滚动条切换改变宽度；不缓存JS视口宽度、不增加布局containment。两侧导航可临时收窄但不自动重写已存宽度。
+- `filesSide(left/right)` 与 `outlineSide` 独立。原生窗口自创建起使用固定的标准AppKit标题栏，不启用 `fullSizeContentView`，不在阅读切换中修改styleMask／窗口外框。Web内容始终位于原生标题栏下方，不再模拟32px标题栏或发送 `zoomWindow`；拖窗及双击系统偏好由AppKit处理。正文列宽直接按实际滚动视口用CSS约束，保留稳定滚动条留白，避免长短文档的滚动条切换改变宽度；根内容列的flex-basis固定为auto，避免CodeMirror保留的窄视口测量在滚动重绘后覆盖应用列宽。不缓存JS视口宽度、不增加布局containment。两侧导航可临时收窄但不自动重写已存宽度。
 - 文件夹消息：原生 `workspace({generation,root})` 登记一次用户选择；Web `workspaceChildren(folderID,generation,showAll,requestID)`，原生返回同字段及 `entries`；Web `openWorkspaceEntry(entryID,generation,requestID)` 仅请求已登记条目。原生返回 `load/activate` 携带 `openRequestID` 与 `preview`，仅最新请求可激活。临时替换经原 closeDocument revision 协调，编辑／保存／任务中页面不自动替换。
 - 所有普通文件先经有界读取及无损Unicode文本识别；`load` 附带原生决定的 `textFile/language/encoding`。非Markdown的文本不安装Markdown解析／格式／图片扩展，提供原文编辑及只读原文。无法识别的二进制／编码仍用占位标签；`openUnsupported(documentID)`只交原生安全目标校验器，不接受Web路径。
 - 打开队列覆盖读取与注册回执，不仅串行磁盘 I/O；新读入的工作区文档在注册前再次验证根身份／选定 inode。旧 `load` 可以暂存为不可见预览状态，以便最新同文件请求复用其身份；最新请求成功或 `openFailed(openRequestID)` 后再经关闭协调回收旧预览，不能先销毁即将复用的文档身份。
@@ -107,7 +108,7 @@ python3 Scripts/release.py Dist/<最终构建目录>/<本次构建> --notes <本
 - 文件树保留原条目路径至描述符检查，不先解析符号链接。`fileSelection`返回原生URL与已核对身份，`FileDocumentStore.open(expectedIdentity:)`在读取正文前核对descriptor的设备／inode，读取后仍复查根与代次。
 - 文本支持UTF-8与BOM标记的UTF-16/32；解码往返验证，不丢弃字节。打开／原编码保存上限16MiB，包含BOM；Web按装载时原生登记的编码预检，原生编码器仍作最终限制。保存桥接快照的UTF-8传输上限为24MiB，以容纳合法UTF-16文本的展开，不扩大磁盘文件上限。换行位置在同一EditorState字段随changes与undo映射，不建第二份正文。纯文本原生会话不登记ImageStore，保存不迁移图片，复制／粘贴仅文本，导出按转义原文处理。
 - `RecentLocations`按来源保存有界元数据：直接记录与仅文件夹来源各最多20条，展示最多20条；`showWorkspaceRecents`默认false。旧URL数组惰性迁移为直接／未知来源，不回扫文件夹推断历史。原生菜单与Web空白页共用已过滤的不透明ID列表；恢复默认只关闭开关，清空记录才清两类历史。
-- 复制范围不通过改变选区来生成；进度及成功反馈采用独立fixed覆盖层，只有原生成功回执才短暂显示成功。正文右键使用受控复制／剪切／粘贴菜单，阻止WebKit原生菜单自动选词；右键与Control单击不进入正文拖选。菜单焦点使用preventScroll，不把DOM事件检查视为物理右键验收。
+- 复制范围不通过改变选区来生成；进度及成功反馈采用独立fixed覆盖层，只有原生成功回执才短暂显示成功。无选区复制成功时，以CodeMirror公开源位置与单元格视图读取可见文本的DOM Range坐标，合并同一行的重叠框，裁切到滚动视口后短暂覆盖；不创建选区、不在编辑DOM插入标记。约1秒自动清理，滚动／输入／调窗／切页取消；减少动态效果时保留静态短暂反馈。正文右键使用受控复制／剪切／粘贴菜单，阻止WebKit原生菜单自动选词；右键与Control单击不进入正文拖选。菜单焦点使用preventScroll，不把DOM事件检查视为物理右键验收。
 - `WorkspaceEntry.modified` 是无跟随 stat 得到的毫秒时间。进入文件导航可请求 `workspaceMetadata(entryIDs,generation,requestID)`，每批最多4096个已登记UUID；回执同代次／请求加 `dates`，只刷新现有DOM时间，不重建点击目标、不读文件正文、不递归遍历。左右栏各有贯穿可用高度的键盘／指针分隔条，同侧目录与文件树共享宽度。
 - `diagnostic(event)` 只接受固定事件枚举，不允许正文、URL、路径、堆栈或任意消息字段。Web同类事件5秒节流；原生捕获到的Error只提取类型、白名单错误域和码，绝不序列化NSError.userInfo／localizedDescription；POSIX失败保留真正errno而非Swift枚举序号。`RuntimeDataStore.record` 与清理共用管理锁，每次通过 `openat(O_NOFOLLOW)` 重新打开固定文件，拒绝符号链接／硬链接和特殊文件，五份约2MiB轮转。不能因日志写入失败递归产生日志。
 - 导出控制器返回明确 `cancelled/exported/printed`，只有系统保存面板确认后才申请本地通知权限；成功原子写入后发送一次通知，失败保留编辑并通知，取消不发送失败通知。前台通知通过本地UNUserNotificationCenter委托申请横幅／列表呈现，OS权限或勿扰可能抑制；没有远程推送注册或请求。
@@ -143,6 +144,10 @@ S3是用户主动配置的图片传输能力，限定HTTPS服务地址、存储�
 - 需求涉及状态归属、协议、文件/图片或权限时先说明影响并保持上述契约；已有工作未经确认不可重置或删除。
 - `main` 保持可独立构建，合入前说明相关验证及未验证项；没有运行的测试、真实输入法、可见呈现或性能不能称为通过。
 - 构建目录、缓存、依赖安装结果、签名包/ZIP、测试日志和个人测试代码不作为产品源码提交。
+
+## 6. 公开文档
+
+根目录 `README.md` 为中文公开介绍，`README.en.md` 为内容对应的英文版；顶部相互链接，产品与隐私说明同步维护。
 
 ## 许可
 

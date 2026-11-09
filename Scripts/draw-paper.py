@@ -31,17 +31,17 @@ def material(kind):
     tone = [0.0] * (SIZE * SIZE)
     relief = [0.0] * (SIZE * SIZE)
     # Pulp clouds, compressed patches and fine tooth, not a flat white-noise veil.
-    for cells, strength in [(5, 2.8), (17, 2.5), (57, 1.7), (193, .9)]:
-        noise_layer(rng, cells, strength * (1.5 if kraft else 1), tone)
-    noise_layer(rng, 117, 1.4 if kraft else 1.0, relief)
-    for _ in range(3100 if kraft else 2100):
+    for cells, strength in [(3, 3.0), (7, 6.2), (19, 4.3), (59, 2.1), (193, .85)]:
+        noise_layer(rng, cells, strength * (1.35 if kraft else 1), tone)
+    noise_layer(rng, 117, 1.8 if kraft else 1.3, relief)
+    for _ in range(3600 if kraft else 2600):
         x0, y0 = rng.uniform(0, SIZE), rng.uniform(0, SIZE)
-        length = min(125, max(5, rng.lognormvariate(2.9 if kraft else 2.7, .66)))
+        length = min(160, max(6, rng.lognormvariate(3.1 if kraft else 2.9, .7)))
         angle = rng.uniform(0, math.tau)
         bend = rng.uniform(-3.5, 3.5)
-        width = rng.uniform(.55, 1.7) * (1.15 if kraft else 1)
+        width = rng.uniform(.7, 2.3) * (1.2 if kraft else 1)
         strength = rng.uniform(.4, 1.25)
-        pigment = rng.uniform(-6.5, 3) * (1.35 if kraft else 1)
+        pigment = rng.uniform(-13, 5.5) * (1.3 if kraft else 1)
         dx, dy = math.cos(angle), math.sin(angle)
         for step in range(math.ceil(length * 1.5)):
             t = step / max(1, math.ceil(length * 1.5) - 1)
@@ -56,8 +56,8 @@ def material(kind):
                     amount = math.exp(-distance * 1.7) * taper * strength
                     at = (py % SIZE) * SIZE + px % SIZE
                     # Unevenly embedded fibers catch a little light on one edge, not ink-like dashes.
-                    relief[at] += amount * 1.1
-                    tone[at] += amount * pigment * .45
+                    relief[at] += amount * 1.4
+                    tone[at] += amount * pigment * .66
     base = (224, 201, 161) if kraft else (247, 243, 231)
     raw = bytearray()
     for y in range(SIZE):
@@ -65,7 +65,10 @@ def material(kind):
         for x in range(SIZE):
             at = y * SIZE + x
             slope = relief[at] - relief[((y - 1) % SIZE) * SIZE + (x - 1) % SIZE]
-            value = tone[at] + slope * (4.5 if kraft else 3.5) + rng.gauss(0, 1.8 if kraft else 1.3)
+            value = tone[at] + slope * (6.2 if kraft else 4.8) + rng.gauss(0, 1.8 if kraft else 1.3)
+            # Compress overlapping kraft fibers so their shadows cannot become ink-like marks.
+            # Keep the existing text color legible even on the darkest part of the material.
+            if kraft: value = 26 * math.tanh(value / 26)
             # Slight chromatic variation is part of the material, not an extra theme-colored overlay.
             raw.extend(max(0, min(255, round(channel + value * factor))) for channel, factor in zip(base, (1, 1.02, 1.06)))
 
