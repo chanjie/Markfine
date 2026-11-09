@@ -14,7 +14,7 @@ import { documentOutline, type OutlineHeading } from './outline';
 import { bodyLineHeight, editingLineHeight, defaultApplicationPreferences, normalizePreferences, preferencesEffect, sourceModeEffect } from './editor-preferences';
 import { formatContext } from './format-context';
 import { tableComposing, tableHasFocus, focusTableSelection, navigateTable, deleteTableCell,tableCopySelection,tableHasRange,tableCellSelection } from './table-editor';
-import { renderBlock,configureImageSources } from './renderer';
+import { renderDocument,configureImageSources } from './renderer';
 import { t, setLanguage, localizePage, formatTimestamp } from './localization';
 import { safeLink } from './links';
 import { installOutlineResize, installScrollIndicators } from './ui-tools';
@@ -39,6 +39,7 @@ import { ImageControls } from './image-controls';
 import { contextMenu, preserveContextSelection, isContextGesture } from './context-menu';
 import { slashMenu } from './slash-menu';
 import { pairedPunctuation } from './paired-punctuation';
+import { continuedStart, listNumberingTransaction, orderedListEditing, orderedMarkerAt } from './ordered-lists';
 import { preserveLineEndings, lineEndings, serializeText, textPresentation, textParagraphRange, renderText, textSnapshot, selectedRawText } from './text-document';
 
 declare global {
@@ -69,6 +70,8 @@ export class EditorApplication {
   pasteJob: PasteJob | null = null;
   closing = false;
   private notice = '';
+  private noticeTimer = 0;
+  private noticeGeneration = 0;
   private copyFeedbackID = 0;
   private copyFeedbackTimer = 0;
   private initialized = false;
@@ -121,6 +124,22 @@ export class EditorApplication {
         { label: t('剪切', 'Cut'), disabled: !editable || !item || item.state.selection.main.empty, run: () => { void this.copyContent(undefined, true); } },
         { label: t('粘贴', 'Paste'), disabled: !editable, run: () => { this.requestPaste(); } }
       ];
+    });
+    byID('editor').addEventListener('contextmenu', event => {
+      const item = this.active, view = this.view;
+      if (!item || item.textFile || !view || this.reading || this.composing() || this.closing || item.imageLocked || item.copyLocked || item.closeLocked) return;
+      const position = view.posAtCoords({ x: event.clientX, y: event.clientY });
+      const list = position === null ? null : orderedMarkerAt(view.state, position); if (!list) return;
+      event.preventDefault();
+      const source = item.state.doc;
+      const apply = (action: 'restart' | 'continue') => {
+        if (this.active !== item || item.state.doc !== source || this.reading || this.composing() || this.closing || item.imageLocked || item.copyLocked || item.closeLocked) return;
+        const spec = listNumberingTransaction(item.state, position!, action); if (spec) this.edit(item.id, spec);
+      };
+      contextMenu(event.clientX, event.clientY, [
+        { label: t('重新编号', 'Restart numbering'), run: () => apply('restart') },
+        { label: t('继续编号', 'Continue numbering'), disabled: continuedStart(view.state, list) === null, run: () => apply('continue') }
+      ], 'ordered-list-menu', true);
     });
     byID<HTMLInputElement>('show-workspace-recents').onchange = event => { const value = (event.target as HTMLInputElement).checked; this.applyPreferences({ showWorkspaceRecents: value }); this.persistPreference('showWorkspaceRecents', value); };
     byID('toggle-outline').onclick = () => this.toggleOutline();
@@ -185,7 +204,7 @@ export class EditorApplication {
     byID('editor').addEventListener('table-paste', () => this.requestPaste());
     byID('editor').addEventListener('table-copy',event=>{const detail=(event as CustomEvent<{markdown:string;raw:boolean}>).detail;void this.copyContent(undefined,false,detail.markdown,detail.raw);});
     byID('editor').addEventListener('table-copy-request',event=>{void this.copyContent(undefined,!!(event as CustomEvent<{cut:boolean}>).detail.cut);});
-    byID('dismiss-notice').onclick = () => { this.notice = ''; this.renderChrome(); };
+    byID('dismiss-notice').onclick = () => this.setNotice('');
     byID('cancel-paste').onclick = () => this.cancelPaste();
     byID('retry-paste').onclick=()=>this.resolvePaste('retry');byID('local-paste').onclick=()=>this.resolvePaste('local');
     byID<HTMLInputElement>('query').oninput = () => this.find(false, true);
@@ -232,7 +251,13 @@ export class EditorApplication {
   }
   get active(): EditorDocument | undefined { return this.documents.get(this.activeID); }
   composing(): boolean { return !!this.view && (this.view.composing || this.view.state.field(composition) || tableComposing(this.view)); }
-  setNotice(text: string): void { this.notice = text; this.renderChrome(); }
+  setNotice(text: string, autoDismiss = false): void {
+    clearTimeout(this.noticeTimer); const generation = ++this.noticeGeneration;
+    this.notice = text; this.renderChrome();
+    if (text && autoDismiss) this.noticeTimer = window.setTimeout(() => {
+      if (generation === this.noticeGeneration) this.setNotice('');
+    }, 5_000);
+  }
   private copyFeedback(text: string, id: number, duration = 0): void {
     if (id !== this.copyFeedbackID) return;
     clearTimeout(this.copyFeedbackTimer); const element = byID('copy-feedback'); element.textContent = text; element.hidden = !text;
@@ -280,7 +305,7 @@ export class EditorApplication {
     const textFile = message.textFile === true, language = typeof message.language === 'string' ? message.language : '';
     const state = EditorState.create({ doc: source, extensions: [
       history(), preserveLineEndings(source), EditorView.lineWrapping, pairedPunctuation(),
-      textFile ? textPresentation(language) : [editorMarkdown(), slashMenu(), blockPreview(id, element => this.hydrate(element, id)), documentOutline],
+      textFile ? textPresentation(language) : [editorMarkdown(), orderedListEditing(state => state.field(composition, false) === true), slashMenu(), blockPreview(id, element => this.hydrate(element, id)), documentOutline],
       EditorView.scrollHandler.of((view, range, options) => {
         const pending = this.pendingMatch;
         if (options.y !== 'center' || pending?.view !== view || pending.position !== range.head) return false;
@@ -387,7 +412,7 @@ export class EditorApplication {
     if (this.reading) { this.pin(next); this.renderReading(); byID('reader').scrollTop = next.readerScroll ?? 0; byID('reader').focus({ preventScroll: true }); }
     else if (next.unsupported) byID('unsupported').focus();
     else this.view.focus();
-    this.notice = ''; this.renderChrome(); this.applyLayout(); this.post('activeDocument', { documentID: id });
+    this.setNotice(''); this.applyLayout(); this.post('activeDocument', { documentID: id });
     // Finish the tab's pending built-in scroll snapshot before subsequent wheel/find actions.
     // A public geometry read flushes CodeMirror's scheduled measure without changing selection.
     if (!this.reading && !next.unsupported) { this.view.coordsAtPos(this.view.state.selection.main.head); this.view.scrollDOM.scrollLeft = next.scrollLeft ?? 0; }
@@ -412,7 +437,7 @@ export class EditorApplication {
   saveActive(): boolean {
     const item = this.active;
     if (!item || item.unsupported || this.composing() || item.imageLocked || item.closeLocked ||item.copyLocked) return false;
-    this.notice = ''; item.saves.requestSave(); return true;
+    this.setNotice(''); item.saves.requestSave(); return true;
   }
   command(action: string): boolean {
     if (this.composing()) return false;
@@ -618,7 +643,7 @@ export class EditorApplication {
       if(job.tableTarget)insert=insert.replace(/\r\n?|\n/g,' ').replace(/(?<!\\)\|/g,'\\|');
       if (insert) this.edit(item.id, { changes: { from: job.selection.main.from, to: job.selection.main.to, insert },
         selection: EditorSelection.single(job.selection.main.from + insert.length), userEvent: 'input.paste', annotations: isolateHistory.of('full') });
-    } else if (message.outcome === 'failure') this.notice = String(message.error || t('粘贴失败，正文未改变', 'Paste failed. The document is unchanged'));
+    } else if (message.outcome === 'failure') this.setNotice(String(message.error || t('粘贴失败，正文未改变', 'Paste failed. The document is unchanged')));
     this.renderChrome();
   }
 
@@ -651,13 +676,13 @@ export class EditorApplication {
         if(changes.length){item.copyLocked=false;this.lock(item);this.edit(item.id,{changes,selection:EditorSelection.cursor(Math.min(changes[0].from,before.length-(range?range.to-range.from:0))),userEvent:'delete.cut',annotations:isolateHistory.of('full')});removed=true;}
       }
       if (this.activeID === item.id) {
-        if(cut&&!removed){this.copyFeedback('',feedback);this.notice=t('已复制，剪切未执行。请重新选择后再试。','Copied. Cut was not applied; select the content and try again.');}
+        if(cut&&!removed){this.copyFeedback('',feedback);this.setNotice(t('已复制，剪切未执行。请重新选择后再试。','Copied. Cut was not applied; select the content and try again.'));}
         else {
           this.copyFeedback(cut?t('已剪切','Cut'):t('已复制','Copied'),feedback,1200);
           if(flashRange&&this.view&&!this.reading&&item.state.doc===before)this.copyHighlight.show(this.view,flashRange);
         }
       }
-    }catch(error){this.copyFeedback('',feedback);if(this.activeID===item.id)this.notice=String((error as Error).message||t('复制未完成','Copy did not finish'));}
+    }catch(error){this.copyFeedback('',feedback);if(this.activeID===item.id)this.setNotice(String((error as Error).message||t('复制未完成','Copy did not finish')));}
     finally{clearTimeout(timer);if(ticket)this.post('abortCopy',{documentID:item.id,ticket});if(this.documents.has(item.id)){item.copyLocked=false;this.lock(item);}this.renderChrome();}
   }
 
@@ -930,11 +955,11 @@ export class EditorApplication {
         for (const item of this.documents.values()) { item.unsubscribe(); item.saves.dispose(); }
         this.documents.clear(); this.stalePreviewIDs.clear(); this.activeID = ''; this.view?.destroy(); this.view = null; byID('editor').replaceChildren();
       }
-      else { for (const item of this.documents.values()) { item.closeLocked = false; this.lock(item); } this.notice = t('关闭/退出已取消，所有编辑保持打开', 'Close / Quit cancelled. All documents remain open'); }
+      else { for (const item of this.documents.values()) { item.closeLocked = false; this.lock(item); } this.setNotice(t('关闭/退出已取消，所有编辑保持打开', 'Close / Quit cancelled. All documents remain open')); }
       this.closing = false; this.renderChrome();
     } else if (kind === 'mermaidReady') this.mermaidResolve?.();
     else if (kind === 'mermaidFailed') this.mermaidReject?.(new Error(String(message.error || t('离线图表加载失败', 'Offline diagram failed to load'))));
-    else if (kind === 'notice') this.setNotice(String(message.text));
+    else if (kind === 'notice') this.setNotice(String(message.text), message.autoDismiss === true);
     else if (kind === 'hostCommand') {
       if (message.action === 'zoom' && typeof message.factor === 'number') {
         if (this.diagramViewer.open) this.diagramViewer.zoom(message.factor);
@@ -1034,7 +1059,7 @@ export class EditorApplication {
     const content = byID('reader-content');
     content.classList.toggle('text-preview', item.textFile);
     if (item.textFile) { content.replaceChildren(renderText(item.state.doc.toString(), item.language)); return; }
-    content.innerHTML = renderBlock(item.state.doc.toString(), item.id);
+    content.innerHTML = renderDocument(item.state.doc.toString(), item.id);
     for (const node of content.querySelectorAll<HTMLElement>('[data-source-line]')) node.dataset.line = String(Number(node.dataset.sourceLine) + 1);
     for (const heading of headingTargets(item.state.doc.toString())) {
       const element = content.querySelector<HTMLElement>(`h${heading.level}[data-source-line="${heading.line}"]`);

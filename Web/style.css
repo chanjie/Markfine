@@ -103,6 +103,11 @@ body::before { content:""; position:fixed; inset:0; pointer-events:none; z-index
 .markdown-comment { color:var(--comment)!important; font-family:"SFMono-Regular","Menlo",monospace; font-size:.88em; font-style:italic; white-space:pre-wrap; overflow-wrap:anywhere; }
 .markdown-comment * { color:var(--comment)!important; }
 .markdown-block pre.comment-block { padding:2px 4px; background:none; border-radius:0; font-size:.88em; line-height:var(--body-line-height); }
+/* Ordinary reading paragraphs keep the same line rhythm as wrapped text. */
+.reading-content p { margin-top:0; margin-bottom:0; }
+/* The welcome page shares the fixed paper underneath the rest of the workspace. */
+.empty { background:transparent; }
+.ordered-list-menu button.selected { background:var(--wash); }
 :root[data-appearance=dark] .hljs-keyword,:root[data-appearance=dark] .hljs-selector-tag,:root[data-appearance=dark] .hljs-meta { color:#d6b3dc; }
 :root[data-appearance=dark] .hljs-string,:root[data-appearance=dark] .hljs-regexp,:root[data-appearance=dark] .hljs-attr { color:#b6d5a1; }
 :root[data-appearance=dark] .hljs-number,:root[data-appearance=dark] .hljs-literal { color:#e4ba8b; }

@@ -1,5 +1,6 @@
 import { EditorSelection, type EditorState, type TransactionSpec } from '@codemirror/state';
 import { t } from './localization';
+import { orderedInsertionStart } from './ordered-lists';
 
 export function physicalFormatShortcut(event: Pick<KeyboardEvent, 'code' | 'ctrlKey' | 'shiftKey' | 'metaKey' | 'altKey' | 'isComposing'>): string | null {
   // Pinyin keyboards can report “·” or “～” for this physical key. Do not bind a
@@ -44,8 +45,9 @@ export function formatTransaction(state: EditorState, action: string): Transacti
   } else if (['quote', 'unordered', 'ordered', 'task'].includes(action)) {
     const pattern = action === 'quote' ? /^> ?/ : action === 'unordered' ? /^[-+*] / : action === 'ordered' ? /^\d+\. / : /^[-+*] \[[ xX]\] /;
     const remove = lines.every(line => pattern.test(line));
+    const start = action === 'ordered' ? orderedInsertionStart(state, first.from) : 1;
     changed = lines.map((line, index) => remove ? line.replace(pattern, '') :
-      (action === 'quote' ? '> ' : action === 'unordered' ? '- ' : action === 'ordered' ? `${index + 1}. ` : '- [ ] ') + line);
+      (action === 'quote' ? '> ' : action === 'unordered' ? '- ' : action === 'ordered' ? `${start + index}. ` : '- [ ] ') + line);
   } else if (action === 'indent') changed = lines.map(line => '  ' + line);
   else if (action === 'outdent') changed = lines.map(line => line.replace(/^(?: {1,2}|\t)/, ''));
   else return null;

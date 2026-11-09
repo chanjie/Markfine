@@ -130,20 +130,39 @@ export function extractReferences(source: string): References {
 
 const cache = new Map<string, string>();
 export function renderBlock(source: string, documentID: string, context: ReferenceContext = emptyReferences,
-                            syntax?: { node: SyntaxBranch; from: number }): string {
+                            syntax?: { node: SyntaxBranch; from: number }, hideComments = false): string {
   const projection = syntax ? projectSource(source, syntax.node, syntax.from, markdown.utils.unescapeAll) : undefined;
-  const key = `${t('zh', 'en')}\0${documentID}\0${context.key}\0${source}\0${projection?.signature ?? 'unmapped'}`;
+  const key = `${t('zh', 'en')}\0${documentID}\0${context.key}\0${hideComments}\0${source}\0${projection?.signature ?? 'unmapped'}`;
   const hit = cache.get(key);
   if (hit !== undefined) return hit;
   // The block parser may add definitions to env. Never mutate a shared document context.
   const references = Object.assign(Object.create(null), context.references);
   const env = { documentID, references };
-  const tokens = markdown.parse(source, env);
+  const parsed = markdown.parse(source, env);
+  const tokens = hideComments ? withoutComments(parsed) : parsed;
   if (projection) annotateSourceMaps(tokens, projection);
   const html = markdown.renderer.render(tokens, markdown.options, env);
   if (cache.size >= 96) cache.delete(cache.keys().next().value!);
   cache.set(key, html);
   return html;
+}
+
+function withoutComments(tokens: ReturnType<typeof markdown.parse>): ReturnType<typeof markdown.parse> {
+  const visible = tokens.filter(token => token.type !== 'markfine_comment' && token.type !== 'markfine_comment_block');
+  for (const token of visible) if (token.children) token.children = withoutComments(token.children);
+  // Adjacent inline comments may form a paragraph rather than a comment block.
+  // Do not leave an empty paragraph occupying a reading line after removing them.
+  return visible.filter((token, index) => {
+    const at = token.type === 'paragraph_open' ? index : token.type === 'inline' ? index - 1 : token.type === 'paragraph_close' ? index - 2 : -1;
+    if (at < 0 || visible[at]?.type !== 'paragraph_open' || visible[at + 2]?.type !== 'paragraph_close') return true;
+    const inline = visible[at + 1];
+    return inline.type !== 'inline' || !!inline.children?.some(child => !['softbreak', 'hardbreak'].includes(child.type) && (child.type !== 'text' || child.content.trim()));
+  });
+}
+
+/** Reading and output share the same comment-free rendering; editable source is untouched. */
+export function renderDocument(source: string, documentID: string, context: ReferenceContext = emptyReferences): string {
+  return renderBlock(source, documentID, context, undefined, true);
 }
 
 export function linkTarget(source: string, context: ReferenceContext = emptyReferences): string | null {

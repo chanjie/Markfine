@@ -1,10 +1,10 @@
-import { renderBlock, emptyReferences, type ReferenceContext } from './renderer';
+import { renderDocument, emptyReferences, type ReferenceContext } from './renderer';
 
 export interface RenderedSnapshot { html:string;resources:string[];imageBindings:{source:string;resource:string}[] }
 
 /** Render an immutable source snapshot without switching the editor's mode, selection or history. */
 export async function exportHTML(source: string, documentID: string, mermaid: () => Promise<void>, context: ReferenceContext=emptyReferences): Promise<RenderedSnapshot> {
-  const content = document.createElement('article'); content.innerHTML = renderBlock(source, documentID,context);
+  const content = document.createElement('article'); content.innerHTML = renderDocument(source, documentID,context);
   for (const diagram of content.querySelectorAll<HTMLElement>('[data-diagram]')) {
     await mermaid();
     const svg = await globalThis.__markfineRenderDiagram!(diagram.dataset.diagram!, documentID);

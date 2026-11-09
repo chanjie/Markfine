@@ -57,6 +57,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     private let notifications = ExportNotifications()
     private var preferences: [String: Any] { settings.values }
     private var readingEnabled = false
+    private let windowPaper = WindowPaper()
     private var physicalShortcutMonitor: Any?
     private func l(_ text: String) -> String {
         guard settings.english else { return text }
@@ -304,7 +305,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
             if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua { return NSColor(srgbRed: 0.102, green: 0.118, blue: 0.110, alpha: 1) }
             return theme == "kraft" ? NSColor(srgbRed: 0.878, green: 0.788, blue: 0.631, alpha: 1) : theme == "eye" ? NSColor(srgbRed: 0.898, green: 0.933, blue: 0.890, alpha: 1) : NSColor(srgbRed: 0.969, green: 0.953, blue: 0.906, alpha: 1)
         }
-        window?.backgroundColor = color; webView.underPageBackgroundColor = color
+        window?.backgroundColor = windowPaper.background(theme: theme, resources: resources)
+        webView.underPageBackgroundColor = color // WK's page fallback remains a solid color, not an NSColor pattern.
     }
     private func openLink(_ command: [String: Any]) {
         guard let id = command["documentID"] as? String, let metadata = documents[id], let href = command["href"] as? String, let request = command["requestID"] as? String else { return }
@@ -771,7 +773,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         } catch { fail("rejectedBridgeMessage", error) }
     }
 
-    private func notice(_ text: String) { emit(["kind": "notice", "text": text]) }
+    private func notice(_ text: String, autoDismiss: Bool = false) { emit(["kind": "notice", "text": text, "autoDismiss": autoDismiss]) }
     private func updateWindowTitle() {
         let metadata = activeDocumentID.flatMap { documents[$0] }
         let unsupported = activeDocumentID.flatMap { unsupportedFiles[$0] }
@@ -796,7 +798,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
             }, image: { reference in
                 return try await self.readImage(reference, documentID: id)
             })
-            if case .exported(let url) = result { notice(settings.text("导出成功：", "Export complete: ") + url.lastPathComponent); await notifications.send(success: true, name: url.lastPathComponent, english: settings.english) }
+            if case .exported(let url) = result { notice(settings.text("导出成功：", "Export complete: ") + url.lastPathComponent, autoDismiss: true); await notifications.send(success: true, name: url.lastPathComponent, english: settings.english) }
         } catch {
             record("documentOutputFailure", error)
             notice(settings.text("导出／打印未完成：请检查排版参数、字体、图片或输出位置。", "Export / Print did not finish. Check layout options, fonts, images or the output location.") + " " + String(describing: error))
