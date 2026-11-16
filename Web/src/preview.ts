@@ -1,6 +1,7 @@
-import { EditorSelection, StateEffect, StateField, type EditorState, type Transaction } from '@codemirror/state';
+import { EditorSelection, StateEffect, StateField, type EditorState, type Text, type Transaction } from '@codemirror/state';
 import { forceParsing } from '@codemirror/language';
 import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet } from '@codemirror/view';
+import type { Tree } from '@lezer/common';
 import { renderBlock, type ReferenceContext } from './renderer';
 import { referenceIndex, refreshReferences } from './reference-context';
 import { mappedCaretAtPoint } from './source-hit';
@@ -29,6 +30,31 @@ const viewport = StateField.define<{ from: number; to: number }>({
     return value;
   }
 });
+
+const imageRangeCache = new WeakMap<Tree, readonly { from: number; to: number }[]>();
+export function imageRanges(tree: Tree, doc: Text): readonly { from: number; to: number }[] {
+  const cached = imageRangeCache.get(tree); if (cached) return cached;
+  const images: { from: number; to: number }[] = []; let offset = 0;
+  // Search text chunks instead of visiting every inline syntax node on each edit.
+  // Image syntax always begins with ![, and the tree remains the authority.
+  for (const part of doc.iter()) {
+    for (let at = part.indexOf('!'); at >= 0; at = part.indexOf('!', at + 1)) {
+      const position = offset + at; if (position >= tree.length) break;
+      if (doc.sliceString(position, position + 2) !== '![') continue;
+      let node = tree.resolveInner(position, 1);
+      while (node.parent && node.name !== 'Image' && node.from >= position) node = node.parent;
+      if (node.name !== 'Image' || node.from !== position) continue;
+      let parent = node.parent, excluded = false;
+      while (parent) {
+        if (['Image', 'Table', 'FencedCode', 'CodeBlock'].includes(parent.name)) { excluded = true; break; }
+        parent = parent.parent;
+      }
+      if (!excluded) images.push({ from: node.from, to: node.to });
+    }
+    offset += part.length; if (offset >= tree.length) break;
+  }
+  imageRangeCache.set(tree, images); return images;
+}
 
 class ListMarker extends WidgetType {
   constructor(readonly text: string) { super(); }
@@ -154,11 +180,7 @@ function decorations(state: EditorState, documentID: string, hydrate: (element: 
       }
       result.push(Decoration.replace({ widget: new TableWidget(state.sliceDoc(node.from, node.to), node.from, muted(node.from, node.to)), block: true }).range(node.from, node.to)); return false;
     }
-    if (name === 'Image') {
-      const source = state.sliceDoc(node.from, node.to);
-      result.push(Decoration.widget({ widget: new BlockWidget(source, node.from, documentID, index.context, hydrate), side: 1 }).range(node.to));
-      mark(node.from, node.to, 'image-reference'); return false;
-    }
+    if (name === 'Image') return false;
     const heading = /^(?:ATXHeading|SetextHeading)([1-6])$/.exec(name);
     if (heading) {
       lineClass(node.from, node.to, `live-heading live-h${heading[1]}`);
@@ -187,6 +209,13 @@ function decorations(state: EditorState, documentID: string, hydrate: (element: 
     if (name === 'ListMark' && /^[-+*]$/.test(state.sliceDoc(node.from, node.to))) result.push(Decoration.replace({ widget: new ListMarker('•') }).range(node.from, node.to));
     if (name === 'TaskMarker') result.push(Decoration.replace({ widget: new TaskMarker(node.from, node.to, /x/i.test(state.sliceDoc(node.from, node.to))) }).range(node.from, node.to));
   } });
+  if (!raw) for (const image of imageRanges(index.tree, state.doc)) {
+    // Keep image decorations in the height map after they leave the source
+    // viewport. CodeMirror still creates image DOM only for visible ranges.
+    const source = state.sliceDoc(image.from, image.to);
+    result.push(Decoration.widget({ widget: new BlockWidget(source, image.from, documentID, index.context, hydrate), side: 1 }).range(image.to));
+    mark(image.from, image.to, 'image-reference');
+  }
   // Virtual height changes can move the viewport away from a focused child
   // editor. Retain only its active table decoration so the existing cell DOM
   // is not destroyed; do not render the intervening document or replace a
@@ -294,12 +323,13 @@ export function blockPreview(documentID: string, hydrate: (element: HTMLElement)
   });
   const visible = ViewPlugin.fromClass(class {
     private frame = 0;
+    private timer = 0;
     constructor(readonly view: EditorView) { this.schedule(); }
     update() { this.schedule(); }
     schedule() {
-      if (this.frame) return;
-      this.frame = requestAnimationFrame(() => {
-        this.frame = 0;
+      if (this.frame || this.timer) return;
+      const run = () => {
+        cancelAnimationFrame(this.frame); clearTimeout(this.timer); this.frame = 0; this.timer = 0;
         if (this.view.composing || this.view.state.field(composition)) return;
         if (!this.view.state.field(referenceIndex).ready) {
           const before = this.view.state;
@@ -314,9 +344,13 @@ export function blockPreview(documentID: string, hydrate: (element: HTMLElement)
             Math.abs(current.from - from) > 500 || Math.abs(current.to - to) > 500) {
           this.view.dispatch({ effects: viewportEffect.of({ from, to }) });
         }
-      });
+      };
+      this.frame = requestAnimationFrame(run);
+      // A minimized or detached WebView can suspend animation frames even
+      // while its viewport and syntax state continue to change.
+      this.timer = window.setTimeout(run, 120);
     }
-    destroy() { cancelAnimationFrame(this.frame); }
+    destroy() { cancelAnimationFrame(this.frame); clearTimeout(this.timer); }
   });
   return [composition, viewport, referenceIndex, editorPreferences, sourceMode, field, visible, renderedSelection, EditorView.domEventHandlers({
     compositionstart: (_event, view) => { view.dispatch({ effects: composingEffect.of(true) }); return false; },

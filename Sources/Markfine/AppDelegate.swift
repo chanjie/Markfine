@@ -536,7 +536,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         guard pasteTask == nil, !saving.contains(id), closeRequest == nil, !copying.contains(id) else {
             emit(["kind": "pasteReceipt", "documentID": id, "requestID": requestID, "outcome": "failure", "error": settings.text("请先等待当前保存或图片任务完成", "Wait for the current save or image operation to finish")]); return
         }
-        let input: ClipboardInput
         let pasteboard = NSPasteboard.general // Read only in response to a user-initiated paste.
         let changeCount = pasteboard.changeCount
         if documents[id]?.isMarkdown == false {
@@ -546,18 +545,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
             if valid { receipt["text"] = text! } else { receipt["error"] = settings.text("剪贴板没有可用的纯文本，或内容超过文本上限。", "The clipboard has no usable plain text, or the text is too large.") }
             emit(receipt); return
         }
-        let archive = pasteboard.data(forType: ClipboardContents.archiveType)
-        input = ClipboardInput(png: pasteboard.data(forType: .png), jpeg: pasteboard.data(forType: NSPasteboard.PasteboardType("public.jpeg")),
-                               tiff: pasteboard.data(forType: .tiff), text: pasteboard.string(forType: .string))
-        guard pasteboard.changeCount == changeCount else {
-            emit(["kind": "pasteReceipt", "documentID": id, "requestID": requestID, "outcome": "failure", "error": settings.text("读取期间剪贴板已变化，请重新粘贴", "The clipboard changed while reading. Please paste again")]); return
+        do {
+            let snapshot = try ClipboardReader.read(pasteboard)
+            guard pasteboard.changeCount == changeCount else {
+                emit(["kind": "pasteReceipt", "documentID": id, "requestID": requestID, "outcome": "failure", "error": settings.text("读取期间剪贴板已变化，请重新粘贴", "The clipboard changed while reading. Please paste again")]); return
+            }
+            performPaste(command, input: snapshot.input, archive: snapshot.archive, local: false)
+        } catch {
+            emit(["kind": "pasteReceipt", "documentID": id, "requestID": requestID, "outcome": "failure", "error": l(String(describing: error))])
         }
-        performPaste(command, input: input, archive: archive, local: false)
     }
     private func performPaste(_ command: [String: Any], input: ClipboardInput, archive: Data?, local: Bool) {
         let id = command["documentID"] as! String, requestID = command["requestID"] as! String
         let run = UUID(); pasteRun = run; retryInput = input; retryCommand = command; pasteAwaitingDecision = false
-        let useS3 = !local && archive == nil && imageStorage.destination == "s3" && (input.png != nil || input.jpeg != nil || input.tiff != nil)
+        let useS3 = !local && archive == nil && imageStorage.destination == "s3" && (input.png != nil || input.jpeg != nil || input.tiff != nil || input.fileURL != nil)
         pasteUsesS3 = useS3
         let task = Task { @MainActor in
             var receipt: [String: Any] = ["kind": "pasteReceipt", "documentID": id, "requestID": requestID, "outcome": "failure"]
@@ -572,8 +573,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
                     }
                     let text = try await self.evaluate("return globalThis.markfine.replaceImageDestinations(source,mapping)", arguments: ["source": fragment.markdown, "mapping": mapping]) as? String
                     guard let text else { throw BridgeFailure.malformed }; result = ImagePasteResult(reference: nil, text: text)
-                } else if useS3 { result = try await self.remoteImages.upload(input, documentID: id) }
-                else { result = try await self.images.paste(input, documentID: id) }
+                } else {
+                    let prepared = try await self.images.prepareClipboardInput(input)
+                    try Task.checkCancellation()
+                    guard self.pasteTask?.id == requestID, self.pasteRun == run else { return }
+                    self.retryInput = prepared
+                    if useS3 { result = try await self.remoteImages.upload(prepared, documentID: id) }
+                    else { result = try await self.images.paste(prepared, documentID: id) }
+                }
                 try Task.checkCancellation()
                 receipt["outcome"] = "success"
                 if let reference = result.reference { receipt["reference"] = reference }

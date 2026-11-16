@@ -91,6 +91,7 @@ export class EditorApplication {
   private outlineTimer = 0;
   private centerFrame = 0;
   private pointerSelecting = false;
+  private pointerSelection?: { documentID: string; selection: EditorSelection };
   private preferenceTimers = new Map<string, number>();
   private readingDocument?: EditorState['doc'];
   private readingID = '';
@@ -182,9 +183,24 @@ export class EditorApplication {
       if (event.metaKey || event.ctrlKey) { event.preventDefault(); this.zoomBy(Math.exp(-event.deltaY * .003)); }
       else { this.positionJump++; this.findGeneration++; cancelAnimationFrame(this.centerFrame); this.centerFrame = 0; for (const element of byID('main').querySelectorAll<HTMLElement>('.cm-scroller,.reader,pre,table,.diagram')) stopScroll(element); }
     }, { passive: false });
-    byID('editor').addEventListener('pointerdown', event => { if (event.button !== 0 || isContextGesture(event)) return; this.documentTransition.cancel(); this.pointerSelecting = true; this.findGeneration++; if (this.view) stopScroll(this.view.scrollDOM); });
+    byID('editor').addEventListener('pointerdown', event => {
+      if (event.button !== 0 || isContextGesture(event)) return;
+      this.documentTransition.cancel(); this.findGeneration++;
+      const view = this.view; if (!view) return;
+      stopScroll(view.scrollDOM);
+      // Scrollbar/gutter gestures do not select text and must not recenter the
+      // old caret when the pointer is released.
+      if (!(event.target instanceof Node) || !view.contentDOM.contains(event.target)) { this.positionJump++; return; }
+      this.pointerSelecting = true; this.pointerSelection = { documentID: this.activeID, selection: view.state.selection };
+    });
     byID('reader').addEventListener('pointerdown', () => { this.documentTransition.cancel(); this.positionJump++; this.findGeneration++; stopScroll(byID('reader')); });
-    document.addEventListener('pointerup', () => { if (this.pointerSelecting) { this.pointerSelecting = false; if(!this.view||!tableHasRange(this.view))this.scheduleCenter(); } });
+    document.addEventListener('pointerup', () => {
+      if (!this.pointerSelecting) return;
+      this.pointerSelecting = false;
+      const previous = this.pointerSelection, view = this.view; this.pointerSelection = undefined;
+      if (view && previous?.documentID === this.activeID && !previous.selection.eq(view.state.selection) && !tableHasRange(view)) this.scheduleCenter();
+    });
+    document.addEventListener('pointercancel', () => { this.pointerSelecting = false; this.pointerSelection = undefined; });
     byID('editor').addEventListener('compositionend', () => queueMicrotask(() => this.scheduleCenter()));
     byID('editor').addEventListener('transitionend', event => { if (event.target instanceof Element && event.target.classList.contains('link-syntax')) this.scheduleCenter(); });
     document.addEventListener('click', event => {
@@ -359,7 +375,7 @@ export class EditorApplication {
         if (update.docChanged || update.selectionSet) this.renderOutline();
         if (update.docChanged || update.selectionSet || update.focusChanged) this.scheduleHint();
         if (update.docChanged && this.reading) this.renderReading();
-        if (update.docChanged || update.selectionSet) this.scheduleCenter();
+        if (update.docChanged || update.selectionSet && !update.startState.selection.eq(update.state.selection)) this.scheduleCenter();
       })
     ] });
     const saves = new SaveMachine(context, id, state.doc, transport);

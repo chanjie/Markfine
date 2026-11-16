@@ -8,8 +8,9 @@ public struct ClipboardInput: Sendable {
     public let jpeg: Data?
     public let tiff: Data?
     public let text: String?
-    public init(png: Data? = nil, jpeg: Data? = nil, tiff: Data? = nil, text: String? = nil) {
-        self.png = png; self.jpeg = jpeg; self.tiff = tiff; self.text = text
+    public let fileURL: URL?
+    public init(png: Data? = nil, jpeg: Data? = nil, tiff: Data? = nil, text: String? = nil, fileURL: URL? = nil) {
+        self.png = png; self.jpeg = jpeg; self.tiff = tiff; self.text = text; self.fileURL = fileURL
     }
 }
 public struct ImagePasteResult: Sendable {
@@ -88,6 +89,50 @@ public actor ImageStore {
         documents[id]?.url = url
     }
 
+    /// Materialize one explicitly copied local file off the UI actor, before
+    /// staging or uploading. Retries then use the same immutable bytes.
+    public func prepareClipboardInput(_ input: ClipboardInput) throws -> ClipboardInput {
+        guard let url = input.fileURL else { return input }
+        try Task.checkCancellation()
+        guard url.isFileURL, url.host == nil || url.host == "" || url.host == "localhost",
+              url.query == nil, url.fragment == nil else { throw ImageStoreFailure.denied }
+        let raw = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard raw >= 0 else { throw ImageStoreFailure.unavailable }
+        let file = ImageFD(raw)
+        var info = stat()
+        guard fstat(file.value, &info) == 0, info.st_mode & S_IFMT == S_IFREG,
+              info.st_size > 0, info.st_size <= 64 * 1_048_576 else { throw ImageStoreFailure.invalidImage }
+        var data = Data(count: Int(info.st_size))
+        try data.withUnsafeMutableBytes { bytes in
+            var offset = 0
+            while offset < bytes.count {
+                try Task.checkCancellation()
+                let count = Darwin.read(file.value, bytes.baseAddress!.advanced(by: offset), bytes.count - offset)
+                if count < 0 && errno == EINTR { continue }
+                guard count > 0 else { throw ImageStoreFailure.unavailable }
+                offset += count
+            }
+        }
+        var after = stat()
+        guard fstat(file.value, &after) == 0, after.st_dev == info.st_dev, after.st_ino == info.st_ino,
+              after.st_size == info.st_size, after.st_mtimespec.tv_sec == info.st_mtimespec.tv_sec,
+              after.st_mtimespec.tv_nsec == info.st_mtimespec.tv_nsec else { throw ImageStoreFailure.unavailable }
+        try Task.checkCancellation()
+        guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let type = CGImageSourceGetType(source) as String? else {
+            if let text = input.text, !text.isEmpty { return ClipboardInput(text: text) }
+            throw ImageStoreFailure.unsupported
+        }
+        switch type {
+        case UTType.png.identifier: return ClipboardInput(png: data)
+        case UTType.jpeg.identifier: return ClipboardInput(jpeg: data)
+        case UTType.tiff.identifier: return ClipboardInput(tiff: data)
+        default:
+            if let text = input.text, !text.isEmpty { return ClipboardInput(text: text) }
+            throw ImageStoreFailure.unsupported
+        }
+    }
+
     public func paste(_ input: ClipboardInput, documentID: String) throws -> ImagePasteResult {
         let result = try stage(input, documentID: documentID)
         guard let reference = result.reference else { return result }
@@ -100,6 +145,7 @@ public actor ImageStore {
     public func stage(_ input: ClipboardInput, documentID: String) throws -> ImagePasteResult {
         guard documents[documentID] != nil else { throw ImageStoreFailure.denied }
         try Task.checkCancellation()
+        let input = try prepareClipboardInput(input)
         guard let image = try Self.encode(input) else {
             guard let text = input.text, !text.isEmpty else { throw ImageStoreFailure.unsupported }
             return ImagePasteResult(reference: nil, text: text)
@@ -249,7 +295,13 @@ public actor ImageStore {
         return value
     }
     private static func escapeComponent(_ text: String) -> String {
-        text.addingPercentEncoding(withAllowedCharacters: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~")))!
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        return text.unicodeScalars.map { scalar in
+            if scalar.value >= 128 && !CharacterSet.whitespacesAndNewlines.contains(scalar) && !CharacterSet.controlCharacters.contains(scalar) {
+                return String(scalar)
+            }
+            return String(scalar).addingPercentEncoding(withAllowedCharacters: allowed)!
+        }.joined()
     }
     private static func openDirectory(_ url: URL) throws -> ImageFD {
         let real = url.standardizedFileURL // Resource callers resolve allowed links first; managed staging never follows links.
