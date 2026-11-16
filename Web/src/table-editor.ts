@@ -1,13 +1,25 @@
 import { EditorSelection, EditorState, Transaction, type TransactionSpec } from '@codemirror/state';
 import { defaultKeymap, isolateHistory, cursorCharLeft, cursorCharRight, cursorLineUp, cursorLineDown } from '@codemirror/commands';
-import { EditorView, WidgetType, keymap } from '@codemirror/view';
+import { EditorView, WidgetType, keymap, type KeyBinding } from '@codemirror/view';
 import { editorMarkdown } from './editor-language';
 import { cellInlinePresentation } from './inline-presentation';
 import { t } from './localization';
 import { pairedPunctuation } from './paired-punctuation';
+import { formatTransaction } from './commands';
+import { tableCellWriteback } from './markdown-input-state';
 
 export interface TableCell { from: number; to: number; text: string }
 export interface TableRow { cells: TableCell[]; header: boolean }
+/** Preserve a native composition's history boundary through the parent writeback. */
+export function tableCellUserEvent(transactions: readonly Transaction[]): string {
+  if (transactions.some(tr => tr.isUserEvent('input.format'))) return 'input.format';
+  return transactions.find(tr => tr.isUserEvent('input.type.compose'))?.annotation(Transaction.userEvent) ?? 'input.type';
+}
+/** GFM pipe escaping depends on the parity of the entire preceding backslash run. */
+export function escapeTablePipes(text: string): string {
+  if (!text.includes('|')) return text;
+  return text.replace(/(\\*)\|/g, (whole, slashes: string) => slashes.length % 2 ? whole : slashes + '\\|');
+}
 export interface TableCopy { markdown:string;from:number;to:number;syntheticHeader:boolean;clear:{from:number;to:number;insert:string}[] }
 export function tableSelectionMarkdown(rows:readonly TableRow[],r1:number,c1:number,r2:number,c2:number,alignment:readonly string[]=[]):string {
   const top=Math.min(r1,r2),bottom=Math.max(r1,r2),left=Math.min(c1,c2),right=Math.max(c1,c2);
@@ -15,7 +27,13 @@ export function tableSelectionMarkdown(rows:readonly TableRow[],r1:number,c1:num
   if(!values.length)return '';if(top>0)values.unshift(Array(right-left+1).fill(''));
   return [values[0],Array.from({length:right-left+1},(_,i)=>alignment[left+i]??'---'),...values.slice(1)].map(row=>'| '+row.join(' | ')+' |').join('\n');
 }
-function containerPrefix(line: string): string { return /^(?:[ \t]*>[ \t]?)+[ \t]*/.exec(line)?.[0] ?? /^[ \t]+/.exec(line)?.[0] ?? ''; }
+export function tableContainerPrefix(line: string): string { return /^(?:[ \t]*>[ \t]?)+[ \t]*/.exec(line)?.[0] ?? /^[ \t]+/.exec(line)?.[0] ?? ''; }
+const containerPrefix = tableContainerPrefix;
+export function tableColumnAlignments(source: string): ('left' | 'center' | 'right')[] {
+  const delimiter = source.split('\n')[1] ?? '';
+  return delimiter.slice(containerPrefix(delimiter).length).split('|').map(value => value.trim())
+    .filter(value => /^:?-+:?$/.test(value)).map(value => value.startsWith(':') && value.endsWith(':') ? 'center' : value.endsWith(':') ? 'right' : 'left');
+}
 /** Split only unescaped pipes; retain exact UTF-16 source spans and original padding. */
 export function tableRows(source: string, base: number): TableRow[] {
   const rows: TableRow[] = []; let offset = base;
@@ -69,6 +87,14 @@ export function tableTransaction(source: string, from: number, row: number, colu
   return { changes: { from, to: from + source.length, insert }, selection: EditorSelection.cursor(target), userEvent: 'input.table' };
 }
 const controllers = new WeakMap<HTMLElement, TableController>();
+export function tableInlineFormatKeys(): KeyBinding[] {
+  return Object.entries({ 'Mod-b': 'bold', 'Mod-i': 'italic', 'Mod-k': 'link', 'Mod-Alt-k': 'inlineCode',
+    'Ctrl-Shift-`': 'strike', 'Ctrl-Mod-i': 'image' }).map(([key, action]) => ({ key, run(view: EditorView) {
+    if (view.composing || view.state.readOnly) return false;
+    const spec = formatTransaction(view.state, action); if (!spec) return false;
+    view.dispatch({ ...spec, annotations: isolateHistory.of('full') }); return true;
+  } }));
+}
 export function tableCopySelection(view:EditorView):TableCopy|undefined { for(const element of view.dom.querySelectorAll<HTMLElement>('.live-table')){const value=controllers.get(element)?.copySelection();if(value)return value;} }
 export function tableHasRange(view:EditorView):boolean{for(const element of view.dom.querySelectorAll<HTMLElement>('.live-table'))if(controllers.get(element)?.hasRange)return true;return false;}
 export function tableCellSelection(view:EditorView):{from:number;to:number;selected:boolean}|undefined{for(const element of view.dom.querySelectorAll<HTMLElement>('.live-table')){const value=controllers.get(element)?.textSelection();if(value)return value;}}
@@ -83,7 +109,23 @@ export function tableTextViews(view: EditorView, from: number, to: number): { vi
   }
   return targets;
 }
-export function tableHasFocus(view: EditorView): boolean { return !!view.dom.querySelector('.table-cell-editor.cm-focused'); }
+export function tableHasFocus(view: EditorView): boolean {
+  // The painted focus class can lag a native menu transition. Route commands
+  // from the actual child view focus, not its presentation marker.
+  return [...view.dom.querySelectorAll<HTMLElement>('.live-table')].some(element =>
+    controllers.get(element)?.views.some(child => child.hasFocus) === true);
+}
+export function tableOwnsSelection(view: EditorView): boolean {
+  const head = view.state.selection.main.head;
+  return [...view.dom.querySelectorAll<HTMLElement>('.live-table')].some(element => {
+    const controller = controllers.get(element); return !!controller && head >= controller.start && head <= controller.end;
+  });
+}
+export function formatTableSelection(view: EditorView, action: string): boolean {
+  if (!['bold', 'italic', 'inlineCode', 'strike', 'link', 'image'].includes(action)) return false;
+  for (const element of view.dom.querySelectorAll<HTMLElement>('.live-table')) if (controllers.get(element)?.formatSelection(action)) return true;
+  return false;
+}
 export function deleteTableCell(view: EditorView): boolean {
   for (const element of view.dom.querySelectorAll<HTMLElement>('.live-table')) if (controllers.get(element)?.deleteFocusedCell()) return true;
   return false;
@@ -168,12 +210,30 @@ class TableController {
     queueMicrotask(() => this.focusSelection()); return true;
   }
   sync(source: string, from: number) {
+    const previousFrom = this.from, previousRows = this.rows;
     if(source!==this.source)this.selection=undefined;
     this.source = source; this.from = from;
     const head = this.parent.state.selection.main.head;
     this.element.classList.toggle('table-active', head >= from && head <= from + source.length);
     const rows = tableRows(source, from), cells = rows.flatMap(row => row.cells);
     const structure = rows.map(row => row.cells.length).join(',') + t('zh', 'en');
+    const focused = this.views.findIndex(view => view.dom.contains(document.activeElement));
+    if (structure === this.element.dataset.structure && focused >= 0) {
+      const previous = previousRows.flatMap(row => row.cells)[focused], cell = cells[focused], selection = this.parent.state.selection.main;
+      if (previous && cell) {
+        // Markdown padding is trimmed for display, but a focused editor may be
+        // in the middle of typing boundary spaces. Keep only the exact source
+        // span containing its authoritative parent selection, not another copy.
+        const oldStart = previous.from + from - previousFrom;
+        let start = cell.from, end = cell.to;
+        if (oldStart >= from && oldStart <= start && /^[ \t]*$/.test(source.slice(oldStart - from, start - from))) start = oldStart;
+        if (!cell.text && selection.to < cell.from) end = selection.to;
+        else if (selection.to > end && /^[ \t]*$/.test(source.slice(end - from, selection.to - from))) end = selection.to;
+        if (selection.from >= start && selection.to <= end && start <= end) {
+          cell.from = start; cell.to = end; cell.text = source.slice(start - from, end - from);
+        }
+      }
+    }
     if (this.element.dataset.structure !== structure) {
       this.views.forEach(view => view.destroy()); this.views = []; this.element.replaceChildren(); this.element.dataset.structure = structure;
       const remove = document.createElement('button'); remove.className = 'table-delete'; remove.type = 'button'; remove.textContent = '×';
@@ -190,6 +250,8 @@ class TableController {
             EditorView.editorAttributes.of({ class: 'table-cell-editor' }), EditorView.contentAttributes.of({ 'aria-label': row.header ? t('表头单元格', 'Table header cell') : t('表格单元格', 'Table cell') }),
             EditorState.transactionFilter.of(transaction => transaction.docChanged && (this.parent.state.readOnly || /[\r\n]/.test(transaction.newDoc.toString())) ? [] : transaction),
               keymap.of([{ key: 'Tab', run: () => this.move(index, 1) }, { key: 'Shift-Tab', run: () => this.move(index, -1) },
+               ...tableInlineFormatKeys(),
+               { key: 'Mod-/', run: () => { this.parent.dom.dispatchEvent(new CustomEvent('editor-toggle-source', { bubbles: true })); return true; } },
                { key: 'Mod-Shift-k', run: () => this.clearCell(index) }, { key: 'Mod-Alt-Shift-k', run: () => this.clearCell(index) },
                ...(['left', 'right', 'up', 'down'] as const).map(direction => ({ key: 'Arrow' + direction[0].toUpperCase() + direction.slice(1), run: (view: EditorView) => this.arrow(view, index, direction) })),
               { key: 'Enter', run: () => this.move(index, row.cells.length) }, { key: 'Escape', run: () => { this.parent.focus(); return true; } },
@@ -197,11 +259,23 @@ class TableController {
             EditorView.updateListener.of(update => {
               if (this.syncing || this.selection&&!update.docChanged || (!update.docChanged && !update.selectionSet && !update.focusChanged)) return;
               if (update.focusChanged && !update.view.hasFocus) return;
-              const cell = this.rows.flatMap(row => row.cells)[index]; if (!cell) return;
-              const spec: TransactionSpec = { selection: EditorSelection.single(cell.from + update.state.selection.main.anchor, cell.from + update.state.selection.main.head) };
-              if (update.docChanged) { spec.changes = { from: cell.from, to: cell.to, insert: update.state.doc.toString().replace(/(?<!\\)\|/g, '\\|') }; spec.userEvent = 'input.type'; }
+              const source = update.state.doc.toString(), selection = update.state.selection.main;
+              const offset = (at: number) => escapeTablePipes(source.slice(0, at)).length;
+              const changed = update.docChanged, userEvent = tableCellUserEvent(update.transactions);
               // A child update cannot dispatch into its parent synchronously during the parent's DOM update.
-              queueMicrotask(() => { if (this.element.isConnected && !this.parent.state.readOnly) this.parent.dispatch(spec); });
+              // Resolve the authoritative range at commit time: earlier queued
+              // child updates may already have changed this cell's source span.
+              queueMicrotask(() => {
+                if (!this.element.isConnected || this.parent.state.readOnly || this.views[index] !== update.view) return;
+                const cell = this.rows.flatMap(row => row.cells)[index]; if (!cell) return;
+                const spec: TransactionSpec = { selection: EditorSelection.single(cell.from + offset(selection.anchor), cell.from + offset(selection.head)), annotations: tableCellWriteback.of(true) };
+                if (changed) {
+                  spec.changes = { from: cell.from, to: cell.to, insert: escapeTablePipes(source) };
+                  spec.userEvent = userEvent;
+                  if (userEvent === 'input.format') spec.annotations = [tableCellWriteback.of(true), isolateHistory.of('full')];
+                }
+                this.parent.dispatch(spec);
+              });
             }), EditorView.domEventHandlers({copy:event=>{event.preventDefault();this.parent.dom.dispatchEvent(new CustomEvent('table-copy-request',{bubbles:true,detail:{cut:false}}));return true;},cut:event=>{event.preventDefault();this.parent.dom.dispatchEvent(new CustomEvent('table-copy-request',{bubbles:true,detail:{cut:true}}));return true;},paste: event => {
               event.preventDefault(); this.parent.dom.dispatchEvent(new CustomEvent('table-paste', { bubbles: true })); return true;
             } })
@@ -215,19 +289,43 @@ class TableController {
       this.views.forEach((view, index) => {
         const text = cells[index].text;
         const effects = view.state.doc.toString() === text ? {} : { changes: { from: 0, to: view.state.doc.length, insert: text } };
-        if ('changes' in effects) view.dispatch({ ...effects, annotations: Transaction.addToHistory.of(false) });
-        view.contentDOM.contentEditable = String(!this.parent.state.readOnly);
+        if ('changes' in effects) {
+          const selection = this.parent.state.selection.main, cell = cells[index];
+          const mapped = selection.from >= cell.from && selection.to <= cell.to ? { selection: EditorSelection.single(selection.anchor - cell.from, selection.head - cell.from) } : {};
+          view.dispatch({ ...effects, ...mapped, annotations: Transaction.addToHistory.of(false) });
+        }
+        const editable = String(!this.parent.state.readOnly);
+        if (view.contentDOM.contentEditable !== editable) view.contentDOM.contentEditable = editable;
       });
     } finally { this.syncing = false; }
+    const alignment = tableColumnAlignments(source);
+    for (const cell of this.element.querySelectorAll<HTMLElement>('th[data-column],td[data-column]')) {
+      cell.style.textAlign = alignment[Number(cell.dataset.column)] ?? 'left';
+    }
     this.paintSelection();
   }
   focusSelection(): boolean {
-    const position = this.parent.state.selection.main.head, cells = this.rows.flatMap(row => row.cells);
-    const index = cells.findIndex(cell => position >= cell.from && position <= cell.to);
+    const selection = this.parent.state.selection.main, cells = this.rows.flatMap(row => row.cells);
+    const index = cells.findIndex(cell => selection.from >= cell.from && selection.to <= cell.to);
     if (index < 0) return false;
     this.syncing = true;
-    try { this.views[index].dispatch({ selection: EditorSelection.cursor(position - cells[index].from) }); this.views[index].focus(); }
+    try { this.views[index].dispatch({ selection: EditorSelection.single(selection.anchor - cells[index].from, selection.head - cells[index].from) }); this.views[index].focus(); }
     finally { this.syncing = false; }
+    return true;
+  }
+  formatSelection(action: string): boolean {
+    if (this.parent.state.readOnly || this.composing) return false;
+    let index = this.views.findIndex(view => view.hasFocus);
+    if (index < 0) {
+      const selection = this.parent.state.selection.main;
+      index = this.rows.flatMap(row => row.cells).findIndex(cell => selection.from >= cell.from && selection.to <= cell.to);
+      if (index < 0 || !this.focusSelection()) return false;
+    }
+    const child = this.views[index], spec = formatTransaction(child.state, action);
+    if (!spec) return false;
+    // The focused child owns its DOM selection; its normal writeback updates the
+    // single parent document/history. Never replace source behind a live child.
+    child.dispatch({ ...spec, annotations: isolateHistory.of('full') });
     return true;
   }
   move(index: number, direction: number): boolean {

@@ -1,14 +1,16 @@
-import { EditorSelection, StateEffect, StateField, type EditorState } from '@codemirror/state';
+import { EditorSelection, StateEffect, StateField, type EditorState, type Transaction } from '@codemirror/state';
 import { forceParsing } from '@codemirror/language';
 import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet } from '@codemirror/view';
 import { renderBlock, type ReferenceContext } from './renderer';
 import { referenceIndex, refreshReferences } from './reference-context';
 import { mappedCaretAtPoint } from './source-hit';
 import { editorPreferences, preferencesEffect, sourceMode, sourceModeEffect } from './editor-preferences';
-import { TableWidget } from './table-editor';
+import { TableWidget, tableRows } from './table-editor';
 import { inlineDecorations } from './inline-presentation';
 import { t } from './localization';
 import { highlightCode } from './code-highlighting';
+import { pendingListLine, tableConstruction, tableCellWriteback } from './markdown-input-state';
+import { sourceTablePosition, sourceTablePresentation } from './table-construction';
 
 export const composingEffect = StateEffect.define<boolean>();
 const viewportEffect = StateEffect.define<{ from: number; to: number }>();
@@ -106,9 +108,18 @@ function decorations(state: EditorState, documentID: string, hydrate: (element: 
   let active = index.tree.resolveInner(position, -1);
   while (active.parent && !/^(Paragraph|Task|ATXHeading[1-6]|SetextHeading[12]|Table|FencedCode|CodeBlock|HTMLBlock|CommentBlock)$/.test(active.name)) active = active.parent;
   const focus = state.field(editorPreferences).focusMode;
-  const muted = (from: number, to: number) => focus && (active.name === 'Document' ? !(position >= from && position <= to) : (to < active.from || from > active.to));
+  const pending = state.field(pendingListLine, false);
+  let activeFrom = active.from, activeTo = active.to;
+  if (active.name === 'Paragraph' || pending != null && active.from < pending && active.to >= pending) {
+    let item = active.parent;
+    while (item && !['ListItem', 'Document'].includes(item.name)) item = item.parent;
+    if (item?.name === 'ListItem') { activeFrom = item.from; activeTo = item.to; }
+    else { const line = state.doc.lineAt(position); activeFrom = line.from; activeTo = line.to; }
+  }
+  const muted = (from: number, to: number) => focus && (active.name === 'Document' ? !(position >= from && position <= to) : (to < activeFrom || from > activeTo));
   const lines = new Map<number, Set<string>>();
   const headingStarts = new Map<number, string>();
+  const lineAttributes = new Map<number, Record<string, string>>();
   const lineClass = (from: number, to: number, className: string) => {
     for (let number = state.doc.lineAt(from).number; number <= state.doc.lineAt(to).number; number++) {
       const start = state.doc.line(number).from;
@@ -119,12 +130,28 @@ function decorations(state: EditorState, documentID: string, hydrate: (element: 
     const line = state.doc.line(n); lineClass(line.from, line.to, (muted(line.from, line.to) ? 'unfocused-block' : 'focused-block') + (raw ? ' source-line' : ''));
   }
   const mark = (from: number, to: number, className: string) => { if (to > from) result.push(Decoration.mark({ class: className }).range(from, to)); };
+  let activeTableRendered = false;
   index.tree.iterate({ from: range.from, to: range.to, enter(ref) {
     const node = ref.node, name = node.name;
+    if (/^SetextHeading/.test(name) && pending != null && pending >= node.from && pending <= node.to) return false;
     if (name === 'CommentBlock') { lineClass(node.from, node.to, 'markdown-comment'); return false; }
     if (name === 'Comment') { mark(node.from, node.to, 'markdown-comment'); return false; }
     if (raw && name !== 'FencedCode' && name !== 'CodeBlock') return;
+    if (name === 'HorizontalRule') {
+      lineClass(node.from, node.to, 'live-thematic');
+      mark(node.from, node.to, 'thematic-source'); return false;
+    }
     if (name === 'Table') {
+      if (node.from === active.from && node.to === active.to) activeTableRendered = true;
+      const construction = state.field(tableConstruction, false);
+      if (construction && node.from <= construction.to && node.to >= construction.from) {
+        const presentation = sourceTablePresentation(state, node, range);
+        result.push(...presentation.marks, ...inlineDecorations(state, index.tree, node.from, node.to, index.context, true, true));
+        for (const line of presentation.lines) {
+          lineClass(line.from, line.to, line.className); lineAttributes.set(line.from, line.attributes);
+        }
+        return false;
+      }
       result.push(Decoration.replace({ widget: new TableWidget(state.sliceDoc(node.from, node.to), node.from, muted(node.from, node.to)), block: true }).range(node.from, node.to)); return false;
     }
     if (name === 'Image') {
@@ -153,14 +180,25 @@ function decorations(state: EditorState, documentID: string, hydrate: (element: 
     }
     if (name === 'HeaderMark') {
       const end = name === 'HeaderMark' && /^ATX/.test(node.parent?.name ?? '') ? Math.min(node.to + 1, node.parent!.to) : node.to;
-      mark(node.from, end, 'syntax-marker');
+      const editing = state.selection.ranges.some(range => range.from <= end && range.to >= node.from);
+      mark(node.from, end, editing ? 'editing-syntax-marker' : 'syntax-marker');
     }
     if (name === 'QuoteMark') result.push(Decoration.replace({}).range(node.from, node.to));
     if (name === 'ListMark' && /^[-+*]$/.test(state.sliceDoc(node.from, node.to))) result.push(Decoration.replace({ widget: new ListMarker('•') }).range(node.from, node.to));
     if (name === 'TaskMarker') result.push(Decoration.replace({ widget: new TaskMarker(node.from, node.to, /x/i.test(state.sliceDoc(node.from, node.to))) }).range(node.from, node.to));
   } });
+  // Virtual height changes can move the viewport away from a focused child
+  // editor. Retain only its active table decoration so the existing cell DOM
+  // is not destroyed; do not render the intervening document or replace a
+  // source table that is still being constructed through its native text node.
+  if (!raw && active.name === 'Table' && !activeTableRendered) {
+    const construction = state.field(tableConstruction, false);
+    if (!construction || active.from > construction.to || active.to < construction.from) {
+      result.push(Decoration.replace({ widget: new TableWidget(state.sliceDoc(active.from, active.to), active.from, false), block: true }).range(active.from, active.to));
+    }
+  }
   for (const [from, classes] of lines) {
-    const attributes: Record<string, string> = {};
+    const attributes: Record<string, string> = { ...lineAttributes.get(from) };
     if (numbers) attributes['data-line'] = String(state.doc.lineAt(from).number);
     if (headingStarts.has(from)) attributes['data-heading'] = headingStarts.get(from)!;
     result.push(Decoration.line({ class: [...classes].join(' ') + (numbers ? ' source-line-number' : ''), attributes }).range(from));
@@ -168,8 +206,41 @@ function decorations(state: EditorState, documentID: string, hydrate: (element: 
   return Decoration.set(result, true);
 }
 
+/** A partial tree must not destroy an unchanged table's live child editors. */
+function retainUnparsedActiveTable(previous: DecorationSet, next: DecorationSet, transaction: Transaction): DecorationSet {
+  const state = transaction.state, index = state.field(referenceIndex);
+  if (index.ready || state.field(sourceMode) || transaction.docChanged && transaction.annotation(tableCellWriteback) !== true) return next;
+  const oldSelection = transaction.startState.selection.main, selection = state.selection.main;
+  const retained: ReturnType<Decoration['range']>[] = [];
+  previous.between(oldSelection.from, oldSelection.to, (from, to, decoration) => {
+    const widget = decoration.spec.widget;
+    if (retained.length || !(widget instanceof TableWidget) || oldSelection.from < from || oldSelection.to > to ||
+        transaction.startState.sliceDoc(from, to) !== widget.source) return;
+    const mappedFrom = transaction.changes.mapPos(from, 1), mappedTo = transaction.changes.mapPos(to, -1);
+    if (mappedFrom >= mappedTo || index.tree.length > mappedFrom || selection.from < mappedFrom || selection.to > mappedTo) return;
+    const construction = state.field(tableConstruction, false);
+    if (construction && mappedFrom <= construction.to && mappedTo >= construction.from) return;
+    const source = state.sliceDoc(mappedFrom, mappedTo);
+    if (transaction.docChanged) {
+      const rows = tableRows(widget.source, from), current = tableRows(source, mappedFrom);
+      const cell = rows.flatMap(row => row.cells).find(cell => oldSelection.from >= cell.from && oldSelection.to <= cell.to);
+      if (!cell || rows.length !== current.length || rows.some((row, i) => row.cells.length !== current[i].cells.length)) return;
+      let insideCell = true;
+      transaction.changes.iterChanges((start, end, _newStart, _newEnd, inserted) => {
+        if (start < cell.from || end > cell.to || /[\r\n]/.test(inserted.toString())) insideCell = false;
+      });
+      if (!insideCell) return;
+    }
+    // Read the current authoritative source; retain presentation only. Completed
+    // parsing, source mode, structural edits, or leaving the table use normal rendering.
+    retained.push(Decoration.replace({ widget: new TableWidget(source, mappedFrom, false), block: true }).range(mappedFrom, mappedTo));
+  });
+  return retained.length ? next.update({ add: retained, sort: true }) : next;
+}
+
 /** Prefer verified text maps; unsupported/non-text output retains explicit boundary/line fallback. */
 function renderedPosition(view: EditorView, target: EventTarget | null, point: { x: number; y: number }): number | null {
+  const table = sourceTablePosition(view, target, point); if (table !== null) return table;
   const element = target instanceof Element ? target : target instanceof Node ? target.parentElement : null;
   const block = element?.closest<HTMLElement>('.markdown-block[data-source-from]');
   if (!block || !view.contentDOM.contains(block)) return null;
@@ -214,7 +285,9 @@ export function blockPreview(documentID: string, hydrate: (element: HTMLElement)
     update: (value, transaction) => {
       if (transaction.state.field(composition)) return value.map(transaction.changes);
       if (transaction.docChanged || transaction.selection || transaction.effects.some(effect => effect.is(viewportEffect) || effect.is(composingEffect) || effect.is(preferencesEffect) || effect.is(sourceModeEffect)) ||
-          transaction.startState.field(referenceIndex) !== transaction.state.field(referenceIndex)) return decorations(transaction.state, documentID, hydrate);
+          transaction.startState.field(referenceIndex) !== transaction.state.field(referenceIndex)) {
+        return retainUnparsedActiveTable(value, decorations(transaction.state, documentID, hydrate), transaction);
+      }
       return value;
     },
     provide: field => EditorView.decorations.from(field)

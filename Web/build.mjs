@@ -3,6 +3,7 @@ import { mkdir, readFile, readdir, copyFile, writeFile } from 'node:fs/promises'
 import { dirname, resolve, relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
+import { codemirrorViewCompatibility } from './codemirror-view-compatibility.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '..');
@@ -20,7 +21,8 @@ for (const name of ['paper-texture.png', 'kraft-texture.png']) await copyFile(re
 const result = await build({
   absWorkingDir: here, entryPoints: ['src/app.ts'], outfile: resolve(outdir, 'app.js'),
   bundle: true, format: 'iife', platform: 'browser', target: 'safari26',
-  minify: true, legalComments: 'external', metafile: true, logLevel: 'info'
+  minify: true, legalComments: 'external', metafile: true, logLevel: 'info',
+  plugins: [codemirrorViewCompatibility()]
 });
 await writeFile(resolve(outdir, '../app-bundle.json'), JSON.stringify(result.metafile, null, 2) + '\n');
 const diagrams = await build({ absWorkingDir: here, entryPoints: ['src/mermaid-runtime.ts'], outfile: resolve(outdir, 'mermaid-runtime.js'),

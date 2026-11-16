@@ -2,6 +2,7 @@ import { StateField, type EditorState } from '@codemirror/state';
 import { referenceIndex } from './reference-context';
 import type { SyntaxNode } from '@lezer/common';
 import { t } from './localization';
+import { pendingListLine } from './markdown-input-state';
 
 export interface OutlineHeading { from: number; to: number; level: number; title: string; children: OutlineHeading[] }
 export function headingTitle(state: EditorState, node: SyntaxNode): string {
@@ -14,6 +15,8 @@ function headings(state: EditorState): OutlineHeading[] {
   state.field(referenceIndex).tree.iterate({ enter(node) {
     const match = /^(?:ATXHeading|SetextHeading)([1-6])$/.exec(node.name);
     if (!match) return;
+    const pending = state.field(pendingListLine, false);
+    if (node.name.startsWith('Setext') && pending != null && pending >= node.from && pending <= node.to) return false;
     const item: OutlineHeading = { from: node.from, to: node.to, level: Number(match[1]), title: headingTitle(state, node.node), children: [] };
     while (stack.length && stack.at(-1)!.level >= item.level) stack.pop();
     (stack.at(-1)?.children ?? result).push(item); stack.push(item);

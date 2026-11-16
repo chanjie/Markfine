@@ -1,6 +1,49 @@
 import { t } from './localization';
 
 export interface TabIdentity { id: string; title: string; path: string }
+
+/** Animate only overflowing active/hovered labels, not the tab or its close button. */
+export function installTabLabelMotion(tabs: HTMLElement): void {
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)');
+  const running = new Map<HTMLElement, { distance: number; animation: Animation }>();
+  let frame = 0;
+  const measure = () => {
+    frame = 0;
+    for (const clip of tabs.querySelectorAll<HTMLElement>('.tab-label-viewport')) {
+      const text = clip.firstElementChild as HTMLElement, row = clip.closest<HTMLElement>('.tab')!;
+      const distance = Math.max(0, text.scrollWidth - clip.clientWidth);
+      const moving = distance > 1 && !document.hidden && (row.classList.contains('active') || row.matches(':hover,:focus-within'));
+      const current = running.get(text);
+      if (!moving || reduced.matches) {
+        current?.animation.cancel(); running.delete(text);
+        text.style.transform = moving && reduced.matches ? `translateX(${-distance}px)` : '';
+        continue;
+      }
+      if (current?.distance === distance) continue;
+      current?.animation.cancel(); text.style.transform = '';
+      const travel = Math.min(8000, Math.max(1200, distance / 34 * 1000)), duration = travel * 2 + 4000;
+      const animation = text.animate([
+        { transform: 'translateX(0)', offset: 0 },
+        { transform: 'translateX(0)', offset: 1000 / duration },
+        { transform: `translateX(${-distance}px)`, offset: (1000 + travel) / duration },
+        { transform: `translateX(${-distance}px)`, offset: (4000 + travel) / duration },
+        { transform: 'translateX(0)', offset: 1 }
+      ], { duration, iterations: Infinity, easing: 'linear' });
+      running.set(text, { distance, animation });
+    }
+  };
+  const schedule = () => { if (!frame) frame = requestAnimationFrame(measure); };
+  const resize = new ResizeObserver(schedule);
+  const refresh = () => {
+    for (const [text, value] of running) if (!text.isConnected) { value.animation.cancel(); running.delete(text); }
+    resize.disconnect(); tabs.querySelectorAll('.tab-label-viewport').forEach(clip => resize.observe(clip)); schedule();
+  };
+  new MutationObserver(refresh).observe(tabs, { childList: true });
+  tabs.addEventListener('pointerover', schedule); tabs.addEventListener('pointerout', schedule);
+  tabs.addEventListener('focusin', schedule); tabs.addEventListener('focusout', schedule);
+  reduced.addEventListener('change', schedule); document.addEventListener('visibilitychange', schedule);
+  refresh();
+}
 /** Find the nearest ancestor whose name distinguishes every same-name peer. Keep no middle directories. */
 export function tabLabel(item: TabIdentity, peers: readonly TabIdentity[]): string {
   if (!item.path) return t('未命名', 'Untitled') + (peers.filter(peer => !peer.path).length > 1 ? ' · ' + (peers.filter(peer => !peer.path).findIndex(peer => peer.id === item.id) + 1) : '');

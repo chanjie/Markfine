@@ -43,11 +43,13 @@ python3 Scripts/release.py Dist/<最终构建目录>/<本次构建> --notes <本
 | `Sources/MarkfineCore/` | Foundation/系统 I/O：文件身份/保存基线、图片存储/权限/生命周期、桥接校验、资源定位 |
 | `Web/src/` | CodeMirror 编辑态、块级预览、语法/源码映射、保存状态机、查找/格式、图表 |
 | `Web/src/table-editor.ts` | 表格单元格视图／Markdown UTF-16 区间映射；编辑提交父文档，撤销／保存不使用独立历史 |
+| `Web/src/table-construction.ts`、`markdown-input-state.ts` | 新表及旧表外延输入的瞬时源范围、原文本节点上的表格网格与位置映射；显式单元格写回与构造输入分开 |
 | `Web/src/outline.ts`、`editor-preferences.ts`、`localization.ts` | 标题树、受校验的用户设置与中英文界面，均不修改正文 |
 | `Web/src/inline-presentation.ts`、`motion.ts`、`ui-tools.ts` | 段落／表格共用行内排版、光标居中与内容结构滚动、目录尺寸与瞬时滚动条 |
 | `Sources/MarkfineCore/ApplicationSettings.swift`、`ExternalLink.swift` | 用户设置白名单／持久化与外部目标解析，不调用外部程序 |
 | `Sources/MarkfineCore/TextDocument.swift`、`Web/src/text-document.ts` | 无损Unicode编码、类型路由、有界纯文本呈现、逐换行保留及原文输出 |
 | `Web/src/paired-punctuation.ts` | 默认成对标点输入、跳过与删除；不接管组词和粘贴 |
+| `Web/src/markdown-input.ts`、`markdown-input-state.ts` | 新列表前缀的短暂输入状态、必要分隔事务、正文Tab与列表项结构缩进；状态声明独立于格式命令，不增加正文副本 |
 | `Sources/Markfine/PreferencesController.swift`、`NativeStrings.swift` | 原生首选项与中英文菜单；外链仅原生用户动作处理器打开 |
 | `Sources/MarkfineCore/WorkspaceStore.swift`、`RecentLocations.swift` | 用户选定文件夹的描述符／ID／代次登记、按层枚举与最近20条记录；不扩展图片授权 |
 | `Sources/MarkfineCore/LocationOpenQueue.swift`、`Web/src/preview-state.ts` | 串行完成用户打开操作至文档登记；回执时复核预览、组词、编辑与任务状态 |
@@ -67,6 +69,7 @@ python3 Scripts/release.py Dist/<最终构建目录>/<本次构建> --notes <本
 | `Config/Markfine.png`、`Markfine.icns` | 原创 AI 主题图标；本地离屏绘制源为 `Scripts/draw-icon.swift`，构建摘要包含图标 |
 | `Web/textures/*.png`、`Scripts/draw-paper.py` | 原创无缝2x纸浆／纤维静态材质及可复现绘制源；PNG随包校验，绘制不在运行时执行 |
 | `Web/build.mjs` | 本地 bundle、精确依赖核对、许可归属和资源清单；不查找/编译测试 |
+| `Web/codemirror-view-compatibility.mjs` | 锁定来源摘要的组件构造兼容变换；在DOM构造前保存原参数，不重写已安装依赖 |
 | `Scripts/build.py` | 独立构建/打包，不要求任何未共享脚本或测试资产 |
 | `docs/REQUIREMENTS.md` | 产品需求与数据/安全/性能边界 |
 | `docs/SHORTCUTS.md`、`docs/USAGE.md` | 键位基线与用户说明 |
@@ -78,6 +81,11 @@ python3 Scripts/release.py Dist/<最终构建目录>/<本次构建> --notes <本
 - Web 是正文、选区、历史的事实来源；原生仅持路径、磁盘基线、资源授权和请求元数据。日常输入不向原生同步全文；装载、保存或用户主动输出才传对应正文／排版快照。
 - 协议版本为 1，共同字段为 `protocolVersion/sessionID/capability/kind`。原生先校验 WebView、主 frame、应用 URL 与独立 content world，再用 `BridgeGate` 严格校验字段/类型/文档权限。
 - 应用初始化/装载使用 `initialize/load/activate/initialReady`；`hostCommand` 传菜单动作。文档消息以 `documentID` 而非标题关联。
+- 原生菜单动作在当前事件内直接排入现有WebKit消息通道，避免首个后续按键越过格式动作；不新增全局键监听或第二套正文。格式事务只改变必要的标记／分隔并映射原选区；表格行内格式在实际单元格视图执行，沿既有父事务写回正文和历史。延后写回在提交时重新取得当前单元格源区间，并核验原子视图身份，不复用先前事务的过期边界；列对齐按分隔行应用。命令所有者以实际子视图焦点判断，不以展示用CSS类判断；编辑器拥有的空Undo/Redo仍消费命令，不回退WebKit DOM历史。源码快捷键在父／子编辑器均优先于语言默认注释动作。
+- 手输Markdown的短暂呈现状态不向正文注入分隔换行；未完成的列表标记不能触发额外空行。模板分隔只由明确的格式命令事务处理，不能把命令模板规则施加于逐字符输入。
+- 新表格或旧表外延输入刚被语法树识别时，以同一EditorState中的短暂源范围保持原生插入节点，在该文本上用行／字符装饰呈现网格；空行结束或选区离开后解除。单元格写回使用独立事务标注，不误判为重新构造。Tab和命中映射使用权威源区间；显式右键请求可交接给既有表格控件。不要在分隔行只输入了一部分时替换整块DOM，也不通过重写正文补偿已丢失的DOM光标。
+- 普通正文专注按显式源换行划分，自动折行仍同属一段；列表项及代码／表格保留结构范围。空标题与前缀编辑位置不能使用零字号隐藏插入点；原生caret规则须覆盖CodeMirror默认主题，并共用于单元格。滚动条空闲透明，保留固定滚动留白，避免隐藏方式引起列宽抖动。
+- 长标签文字通过独立裁切窗口移动，关闭／未保存控件不移动。仅对溢出的活动／悬停标签运行动画；标签未变化时保持DOM身份，避免每个字符重启滚动。后台及系统减少动态效果均有静态处理，不新增持续JavaScript帧循环。
 - 原生 `initialize` 附带 `preferences`：`shortcutHints/focusMode/lineNumbers` 布尔值，`language(system/zh-Hans/en)` 与解析后的 `locale`，`timeZone(local/UTC)`、两个字体 PostScript 名、`editTheme/readTheme(paper/kraft/eye)`、`appearance(system/light/dark)`、`leftWidth/rightWidth(180…360)`、`editLineSpacing/readLineSpacing(0.75…2.5)`、`editZoom/readZoom(0.5…2)`。旧 `outlineWidth` 仅作宽度迁移兼容。行距为旧包各模式实际行高的相对倍数，默认1.3：排版编辑基准1.4，源码／阅读1.85；代码与表格分别沿用自身旧基准。根编辑器规则必须以足够CSS优先级覆盖CodeMirror，否则普通编辑仍会固定1.4。导出使用当前模式乘算后的实际值，不能把1.3直接当CSS行高。原生 UserDefaults 按系统用户持久化，Web 全字段校验并更新显示，不改文档历史。阅读模式为当前窗口的临时状态，不持久化。
 - Web `setPreference(key,value)` 仅接受固定白名单及严格布尔／数值／枚举类型；新增 `outlineSide(left/right)`、`showAllFiles`。目录拖动结束、缩放去抖提交；原生只持久化 Web 已验证的变更，不回传整套旧偏好覆盖进行中的手势。原生设置／恢复默认仍发送 `preferences`，Web 只更新有差异的编辑选项和字体规则。恢复默认只移除偏好白名单，不能清整个 UserDefaults domain 或最近记录。
 - `readingMode(enabled)` 仅控制应用内窗口样式，不修改 NSApp presentation options、Dock、系统菜单或窗口大小。菜单新增 `toggleSource`，排版／源码通过 StateEffect 和 Compartment 在同一 EditorView 上重配置，不能重建正文／选区／撤销历史。

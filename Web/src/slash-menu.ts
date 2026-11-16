@@ -70,9 +70,7 @@ const plugin=ViewPlugin.fromClass(class {
     const from=this.from;if(slashPosition(this.view)!==from){this.close();return;}
     const state=this.view.state,removed=state.update({changes:{from,to:from+1,insert:''},selection:EditorSelection.cursor(from)});
     const action=slashChoices[index].action,spec=formatTransaction(removed.state,action);this.close();if(!spec)return;
-    const formatted=removed.state.update(spec);let selection=formatted.state.selection;
-    if(/^(heading|unordered|ordered|task|quote)/.test(action))selection=EditorSelection.single(selection.main.to);
-    if(action==='table'){const match=/\| ([^|]+) \|/.exec(formatted.state.doc.sliceString(from));if(match)selection=EditorSelection.single(from+match.index+2);}
+    const formatted=removed.state.update(spec);const selection=formatted.state.selection;
     this.view.dispatch({changes:removed.changes.compose(formatted.changes),selection,userEvent:'input.format',annotations:isolateHistory.of('full'),scrollIntoView:true});
     this.view.focus();if(action==='table')queueMicrotask(()=>focusTableSelection(this.view));
   }

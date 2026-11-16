@@ -13,7 +13,9 @@ import { newID } from './protocol';
 import { documentOutline, type OutlineHeading } from './outline';
 import { bodyLineHeight, editingLineHeight, defaultApplicationPreferences, normalizePreferences, preferencesEffect, sourceModeEffect } from './editor-preferences';
 import { formatContext } from './format-context';
-import { tableComposing, tableHasFocus, focusTableSelection, navigateTable, deleteTableCell,tableCopySelection,tableHasRange,tableCellSelection } from './table-editor';
+import { tableComposing, tableHasFocus, focusTableSelection, navigateTable, deleteTableCell,tableCopySelection,tableHasRange,tableCellSelection,tableOwnsSelection,formatTableSelection,tableRows } from './table-editor';
+import { tableConstruction } from './markdown-input-state';
+import { sourceTableTab, sourceTableContextMenu } from './table-construction';
 import { renderDocument,configureImageSources } from './renderer';
 import { t, setLanguage, localizePage, formatTimestamp } from './localization';
 import { safeLink } from './links';
@@ -24,7 +26,7 @@ import { renderEmptyState } from './empty-state';
 import { WorkspaceBrowser, type WorkspaceEntry } from './workspace-browser';
 import { DiagramViewer } from './diagram-viewer';
 import { replaceablePreview } from './preview-state';
-import { tabLabel, closeTargets, showTabMenu, installReadingTabs, pathTooltip, type TabCloseScope } from './tab-navigation';
+import { tabLabel, closeTargets, showTabMenu, installReadingTabs, installTabLabelMotion, pathTooltip, type TabCloseScope } from './tab-navigation';
 import { SearchHighlights } from './search-highlights';
 import { CopyHighlight } from './copy-highlight';
 import { exportHTML } from './document-output';
@@ -41,6 +43,7 @@ import { slashMenu } from './slash-menu';
 import { pairedPunctuation } from './paired-punctuation';
 import { continuedStart, listNumberingTransaction, orderedListEditing, orderedMarkerAt } from './ordered-lists';
 import { preserveLineEndings, lineEndings, serializeText, textPresentation, textParagraphRange, renderText, textSnapshot, selectedRawText } from './text-document';
+import { markdownInput, markdownTab, listIndentTransaction } from './markdown-input';
 
 declare global {
   var __markfineBootstrap: Context;
@@ -75,6 +78,7 @@ export class EditorApplication {
   private copyFeedbackID = 0;
   private copyFeedbackTimer = 0;
   private initialized = false;
+  private renderedTabsKey = '';
   private mermaidPromise?: Promise<void>;
   private mermaidResolve?: () => void;
   private mermaidReject?: (error: Error) => void;
@@ -117,6 +121,7 @@ export class EditorApplication {
     value => { this.applyPreferences({ showAllFiles: value }); this.persistPreference('showAllFiles', value); }, () => { this.applyLayout(); this.renderChrome(); });
 
   constructor() {
+    byID('editor').addEventListener('editor-toggle-source', () => this.command('toggleSource'));
     preserveContextSelection(() => {
       const item = this.active, editable = !!item && !this.reading && !item.unsupported && !item.imageLocked && !item.copyLocked && !item.closeLocked && !this.composing();
       return [
@@ -152,6 +157,7 @@ export class EditorApplication {
     byID('move-outline').onclick = () => { const side = this.preferences.outlineSide === 'left' ? 'right' : 'left'; this.applyPreferences({ outlineSide: side }); this.persistPreference('outlineSide', side); };
     byID('move-files').onclick = () => { const side = this.preferences.filesSide === 'left' ? 'right' : 'left'; this.applyPreferences({ filesSide: side }); this.persistPreference('filesSide', side); };
     installReadingTabs(byID('tab-strip'), byID('tabs-trigger'));
+    installTabLabelMotion(byID('tabs'));
     byID('resume-position').onclick = () => this.resumePosition();
     byID('open-unsupported').onclick = () => { if (this.active?.unsupported) this.post('openUnsupported', { documentID: this.activeID }); };
     byID('zoom-button').onclick = () => { const menu = byID('zoom-menu'); menu.hidden = !menu.hidden; byID('zoom-button').setAttribute('aria-expanded', String(!menu.hidden)); };
@@ -305,7 +311,7 @@ export class EditorApplication {
     const textFile = message.textFile === true, language = typeof message.language === 'string' ? message.language : '';
     const state = EditorState.create({ doc: source, extensions: [
       history(), preserveLineEndings(source), EditorView.lineWrapping, pairedPunctuation(),
-      textFile ? textPresentation(language) : [editorMarkdown(), orderedListEditing(state => state.field(composition, false) === true), slashMenu(), blockPreview(id, element => this.hydrate(element, id)), documentOutline],
+      textFile ? textPresentation(language) : [editorMarkdown(), markdownInput(state => state.field(composition, false) === true), orderedListEditing(state => state.field(composition, false) === true), slashMenu(), blockPreview(id, element => this.hydrate(element, id)), documentOutline],
       EditorView.scrollHandler.of((view, range, options) => {
         const pending = this.pendingMatch;
         if (options.y !== 'center' || pending?.view !== view || pending.position !== range.head) return false;
@@ -317,6 +323,8 @@ export class EditorApplication {
       locks.of(EditorState.readOnly.of(this.reading || message.unsupported === true)), numbers.of([]),
       sourceStyles.of(this.sourceEditing && !textFile ? syntaxHighlighting(defaultHighlightStyle) : []),
       keymap.of([
+        { key: 'Tab', run: view => !this.sourceEditing && (sourceTableTab(view) || tableOwnsSelection(view) && focusTableSelection(view)) || markdownTab(view) },
+        { key: 'Shift-Tab', run: view => !this.sourceEditing && (sourceTableTab(view, true) || tableOwnsSelection(view) && focusTableSelection(view)) || markdownTab(view, true) },
         { key: 'Mod-s', run: () => { this.saveActive(); return true; } },
         {key:'Mod-c',run:()=>this.command('copy')},{key:'Mod-x',run:()=>this.command('cut')},
         // Consume this before CodeMirror's default Mod-/ comment command. The app owns
@@ -333,7 +341,7 @@ export class EditorApplication {
       ]),
       EditorView.contentAttributes.of(() => ({ 'aria-label': textFile ? t('纯文本正文', 'Plain text document') : t('Markdown 正文', 'Markdown document'), spellcheck: 'false', autocorrect: 'off', autocapitalize: 'off' })),
       EditorView.exceptionSink.of(error => { this.errors.push(String(error)); this.diagnostic('editorException'); this.setNotice(t('编辑器发生异常，请保留当前内容：', 'Editor error. Keep your current content: ') + String(error)); }),
-      EditorView.domEventHandlers({ copy:(event)=>{if(!this.reading&&!this.composing()){event.preventDefault();void this.copyContent();return true;}return false;},cut:(event)=>{if(!this.reading&&!this.composing()){event.preventDefault();void this.copyContent(undefined,true);return true;}return false;},paste: (event, view) => {
+      EditorView.domEventHandlers({ contextmenu: (event, view) => !this.sourceEditing && !this.composing() && sourceTableContextMenu(view, event), copy:(event)=>{if(!this.reading&&!this.composing()){event.preventDefault();void this.copyContent();return true;}return false;},cut:(event)=>{if(!this.reading&&!this.composing()){event.preventDefault();void this.copyContent(undefined,true);return true;}return false;},paste: (event, view) => {
         if (view.composing || view.state.field(composition)) return false;
         event.preventDefault(); this.requestPaste(); return true;
       } }),
@@ -480,7 +488,14 @@ export class EditorApplication {
     }
     const item = this.active;
     if (!item || item.imageLocked || item.closeLocked ||item.copyLocked) return false;
-    if (action === 'undo' || action === 'redo') { const cell = tableHasFocus(this.view); const result = action === 'undo' ? undo(this.view) : redo(this.view); if (cell) focusTableSelection(this.view); return result; }
+    if (action === 'undo' || action === 'redo') {
+      const cell = tableHasFocus(this.view);
+      if (action === 'undo') undo(this.view); else redo(this.view);
+      if (cell) focusTableSelection(this.view);
+      // This editor owns the command even when its history is empty. Falling
+      // through to WebKit's DOM undo would create a second document history.
+      return true;
+    }
     if (action === 'deleteLine' || action === 'deleteParagraph') {
       const table=tableCopySelection(this.view);if(table){this.view.dispatch({changes:table.clear,userEvent:'delete.cells',annotations:isolateHistory.of('full')});return true;}
       if (tableHasFocus(this.view)) return deleteTableCell(this.view);
@@ -490,10 +505,12 @@ export class EditorApplication {
       this.view.dispatch({ ...spec, annotations: isolateHistory.of('full') }); return true;
     }
     if (item.textFile && !['indent', 'outdent'].includes(action)) return false;
-    const transaction = formatTransaction(this.view.state, action);
+    if (!this.sourceEditing && tableOwnsSelection(this.view)) return formatTableSelection(this.view, action);
+    const transaction = (['indent', 'outdent'].includes(action) ? listIndentTransaction(this.view.state, action === 'outdent') : null) ?? formatTransaction(this.view.state, action);
     if (!transaction) return false;
-    const cell = tableHasFocus(this.view);
-    this.view.dispatch({ ...transaction, annotations: isolateHistory.of('full') }); if (cell) focusTableSelection(this.view); return true;
+    this.view.dispatch({ ...transaction, annotations: isolateHistory.of('full') });
+    if (this.sourceEditing || action !== 'table' || !focusTableSelection(this.view)) this.view.focus();
+    return true;
   }
 
   showFind(replace: boolean): void {
@@ -512,10 +529,34 @@ export class EditorApplication {
   }
   hideFind(): void {
     if (this.composing()) return;
+    const focused = document.activeElement, fromFind = byID('find-panel').contains(focused);
     this.resetSearchRoom(); byID('find-panel').hidden = true; document.body.classList.remove('finding'); this.highlights.clear();
-    // Closing the panel changes layout, but does not cancel the user's destination. The
-    // in-flight positioning pass must still correct for CodeMirror's next height-map update.
-    if (!this.reading) this.view?.focus(); else byID('reader').focus({ preventScroll: true });
+    if (!this.reading) {
+      const view = this.view;
+      if (!view) return;
+      const selection = view.state.selection, state = view.state;
+      let node = (state.field(referenceIndex, false)?.tree ?? syntaxTree(state)).resolveInner(selection.main.from, 1);
+      while (node.parent && node.name !== 'Table') node = node.parent;
+      const construction = state.field(tableConstruction, false);
+      const sourceCell = node.name === 'Table' && !(construction && node.from <= construction.to && node.to >= construction.from) &&
+        tableRows(state.sliceDoc(node.from, node.to), node.from).some(row => row.cells.some(cell => selection.main.from >= cell.from && selection.main.to <= cell.to));
+      if (this.sourceEditing || !sourceCell) { view.focus(); return; }
+      if (!fromFind && focused && view.dom.contains(focused)) return;
+      // A distant table can be only temporarily rendered during a smooth Find.
+      // Let CodeMirror materialize the actual range before focusing its cell;
+      // focusing the outer replacement DOM (or a soon-removed cell) loses input.
+      const generation = ++this.findGeneration, id = this.activeID, doc = state.doc;
+      this.pendingMatch = undefined; stopScroll(view.scrollDOM);
+      cancelAnimationFrame(this.centerFrame); this.centerFrame = 0;
+      view.dispatch({ effects: EditorView.scrollIntoView(selection.main, { y: 'nearest' }) });
+      view.requestMeasure({ read: () => view.coordsAtPos(selection.main.head), write: () => queueMicrotask(() => {
+        const active = document.activeElement;
+        if (this.view !== view || this.activeID !== id || this.findGeneration !== generation || this.reading || this.sourceEditing ||
+            view.state.doc !== doc || !view.state.selection.eq(selection) || !document.hasFocus() ||
+            active !== focused && active !== document.body && active !== view.contentDOM) return;
+        if (focusTableSelection(view)) this.centerMatch(selection.main.from, () => {});
+      }) });
+    } else byID('reader').focus({ preventScroll: true });
   }
   find(backwards: boolean, fromStart = false): boolean {
     const item = this.active; if (!item || this.composing()) return false;
@@ -524,8 +565,24 @@ export class EditorApplication {
     this.highlights.set(query); const generation = ++this.findGeneration;
     if (match) {
       this.findOffset = backwards ? match.from : match.to;
-      if (!this.reading) this.edit(item.id, { selection: EditorSelection.single(match.from, match.to) });
-      this.centerMatch(match.from, () => { if (generation === this.findGeneration && !byID('find-panel').hidden) { const block = this.matchBlock(match.from); this.highlights.flash(block,block ? this.matchRect(block,match.from) : undefined); } });
+      if (!this.reading) {
+        this.edit(item.id, { selection: EditorSelection.single(match.from, match.to) });
+        // Find owns this destination; a pending typing-centering frame must not
+        // replace its scroll while the virtualized match is being materialized.
+        cancelAnimationFrame(this.centerFrame); this.centerFrame = 0;
+      }
+      this.centerMatch(match.from, () => {
+        if (generation !== this.findGeneration) return;
+        if (!byID('find-panel').hidden) { const block = this.matchBlock(match.from); this.highlights.flash(block,block ? this.matchRect(block,match.from) : undefined); }
+        else {
+          const view = this.view;
+          // The target cell may only have materialized during this Find's
+          // positioning pass. Transfer within an already focused editor only;
+          // a newer selection, control, window or navigation keeps ownership.
+          if (!this.reading && !this.sourceEditing && view?.hasFocus && document.activeElement === view.contentDOM &&
+              view.state.selection.main.from === match.from && view.state.selection.main.to === match.to) focusTableSelection(view);
+        }
+      });
     }
     this.updateFindCount(); return !!match;
   }
@@ -588,9 +645,9 @@ export class EditorApplication {
         if (!current()) return;
         this.ensureSearchRoom(target()); animateScroll(scroller, target(), undefined, immediate ? 0 : undefined, () => {
           if (!current()) return;
-          let finished = false; const finish = (top: number) => { if (finished || !current()) return; finished = true; animateScroll(scroller, top, undefined, immediate ? 0 : 140, complete); };
+          let finished = false; const finish = (top: number) => { if (finished || !current()) return; finished = true; animateScroll(scroller, top, undefined, immediate ? 0 : 140, complete, target); };
           view.requestMeasure({ read: target, write: finish }); window.setTimeout(() => { if (!finished) finish(target()); }, 80);
-        });
+        }, target);
       } };
       view.dispatch({ effects: EditorView.scrollIntoView(position, { y: 'center' }) });
       view.coordsAtPos(position);
@@ -865,21 +922,24 @@ export class EditorApplication {
     append(headings, tree, 0);
   }
   renderChrome(): void {
-    document.getElementById('path-tooltip')?.remove();
-    const tabs = byID('tabs'); tabs.replaceChildren();
-    for (const item of this.documents.values()) {
-      if (this.stalePreviewIDs.has(item.id)) continue;
+    const tabs = byID('tabs'), peers = [...this.documents.values()].filter(item => !this.stalePreviewIDs.has(item.id));
+    const key = JSON.stringify([this.activeID, this.preferences.locale, peers.map(item => [item.id, item.title, item.path, item.saves.dirty, item.preview, item.unsupported, item.imageLocked, item.closeLocked, item.copyLocked])]);
+    if (key !== this.renderedTabsKey) {
+      this.renderedTabsKey = key; document.getElementById('path-tooltip')?.remove(); tabs.replaceChildren();
+      for (const item of peers) {
       const row = document.createElement('div'); row.className = 'tab' + (item.id === this.activeID ? ' active' : '') + (item.preview || item.unsupported ? ' preview-tab' : ''); row.setAttribute('role', 'presentation');
       const select = document.createElement('button'); select.type = 'button'; select.setAttribute('role', 'tab'); select.setAttribute('aria-selected', String(item.id === this.activeID));
       pathTooltip(select, item.path);
       if (item.saves.dirty) { const dot = document.createElement('span'); dot.className = 'dirty'; dot.setAttribute('aria-label', t('未保存', 'Unsaved')); select.append(dot); }
-      select.append(document.createTextNode(tabLabel(item, [...this.documents.values()].filter(other => !this.stalePreviewIDs.has(other.id)))));
+      const clip = document.createElement('span'), label = document.createElement('span');
+      clip.className = 'tab-label-viewport'; label.className = 'tab-label-text'; label.textContent = tabLabel(item, peers); clip.append(label); select.append(clip);
       row.oncontextmenu = event => { if (!this.composing() && !this.closing) showTabMenu(event, [...this.documents.keys()].filter(id => !this.stalePreviewIDs.has(id)), item.id, scope => void this.closeTabs(item.id, scope)); };
       select.onclick = () => this.activate(item.id);
       select.ondblclick = () => this.pin(item);
       const close = document.createElement('button'); close.type = 'button'; close.className = 'close-tab'; close.textContent = '×'; close.setAttribute('aria-label', `${t('关闭', 'Close')} ${this.displayTitle(item)}`);
       close.onclick = () => { void this.closeTab(item.id); }; close.disabled = item.imageLocked || item.closeLocked ||item.copyLocked;
       row.append(select, close); tabs.append(row);
+      }
     }
     const item = this.active;
     document.body.classList.toggle('text-file', !!item?.textFile);
@@ -1141,7 +1201,8 @@ export class EditorApplication {
     const enabled = this.reading ? true : !this.sourceEditing; if (this.reading) this.setReading(false);
     this.sourceEditing = enabled;
     for (const item of this.documents.values()) this.edit(item.id, { effects: [sourceModeEffect.of(enabled), item.sourceStyles.reconfigure(enabled && !item.textFile ? syntaxHighlighting(defaultHighlightStyle) : [])] });
-    this.applyLayout(); this.renderChrome(); this.view?.focus();
+    this.applyLayout(); this.renderChrome();
+    if (this.view && (enabled || !focusTableSelection(this.view))) this.view.focus();
   }
   private moveOutline(side: 'left' | 'right', animate: boolean): void {
     this.moveNavigation(byID('outline-panel'), side, animate);

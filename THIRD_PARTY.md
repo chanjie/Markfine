@@ -20,6 +20,8 @@ Markfine 自有代码与文档采用根 `LICENSE` 的 MIT 许可，随应用提�
 
 `Web/build.mjs` 按编辑器与 Mermaid 两个 bundle 的实际输入生成 `dependencies.json`、`ThirdPartyNotices.txt` 和 `.LEGAL.txt`，随 `.app` 打包，并校验实际安装版本与锁文件一致。运行时不分发 Node/npm/Swift 工具链。
 
+编辑器构建对 `@codemirror/view@6.43.15` 的单个组件工厂应用本地兼容变换：在创建DOM前保存构造参数，再通过同一参数组构造节点。变换源码为 `Web/codemirror-view-compatibility.mjs`，纳入产品输入摘要，原包来源摘要不匹配时拒绝构建；不改写已安装依赖，CodeMirror的MIT许可与原始声明保持不变。
+
 传递依赖不全是 MIT。例如 `elkjs` 的双许可中选择 EPL-2.0，DOMPurify 的双许可中选择 Apache-2.0；具体版本、选择与 LICENSE/NOTICE 原文在每次包内记录。`khroma` 的 MIT 许可来自包内 license 原文核对，不从缺失的元数据推断。
 
 上述自动归属清单不替代独立法律/安全评审。

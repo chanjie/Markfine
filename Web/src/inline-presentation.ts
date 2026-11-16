@@ -1,6 +1,6 @@
-import { StateField, type EditorState } from '@codemirror/state';
+import { StateEffect, type EditorState } from '@codemirror/state';
 import { ensureSyntaxTree, syntaxTree } from '@codemirror/language';
-import { Decoration, EditorView, type DecorationSet } from '@codemirror/view';
+import { Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate } from '@codemirror/view';
 import type { Tree } from '@lezer/common';
 import { emptyReferences, linkTarget, type ReferenceContext } from './renderer';
 
@@ -19,24 +19,27 @@ export function sourceLinkTarget(state: EditorState, position: number, context: 
 }
 
 /** The same inline presentation is used in paragraphs and table cell editors. Source is never rewritten. */
-export function inlineDecorations(state: EditorState, tree: Tree, from: number, to: number, context: ReferenceContext = emptyReferences): ReturnType<Decoration['range']>[] {
+export function inlineDecorations(state: EditorState, tree: Tree, from: number, to: number, context: ReferenceContext = emptyReferences, reveal = true, inTables = false): ReturnType<Decoration['range']>[] {
   const result: ReturnType<Decoration['range']>[] = [];
   const mark = (from: number, to: number, className: string, attributes?: Record<string, string>) => {
     if (to > from) result.push(Decoration.mark({ class: className, attributes }).range(from, to));
   };
   tree.iterate({ from, to, enter(ref) {
     const node = ref.node, name = node.name;
-    if (['FencedCode', 'CodeBlock', 'Image', 'Table'].includes(name)) return false;
+    if (['FencedCode', 'CodeBlock', 'Image'].includes(name) || name === 'Table' && !inTables) return false;
     const inline: Record<string, string> = { StrongEmphasis: 'live-strong', Emphasis: 'live-emphasis', Strikethrough: 'live-strike', InlineCode: 'live-inline-code' };
     if (inline[name]) mark(node.from, node.to, inline[name]);
-    if (['EmphasisMark', 'StrikethroughMark', 'CodeMark'].includes(name)) mark(node.from, node.to, 'syntax-marker');
+    if (['EmphasisMark', 'StrikethroughMark', 'CodeMark'].includes(name)) {
+      const editing = reveal && state.selection.ranges.some(range => range.empty && range.head >= node.from && range.head <= node.to);
+      mark(node.from, node.to, editing ? 'editing-syntax-marker' : 'syntax-marker');
+    }
     if (name === 'Link' || name === 'Autolink') {
       const href = linkTarget(state.sliceDoc(node.from, node.to), context);
       mark(node.from, node.to, 'live-link', href ? { 'data-link-href': href } : undefined);
       if (name === 'Autolink') return;
       const marks = node.getChildren('LinkMark');
       if (marks.length < 2) return;
-      const expanded = state.selection.ranges.some(range => range.empty ? range.head > node.from && range.head < node.to : range.from < node.to && range.to > node.from);
+      const expanded = reveal && state.selection.ranges.some(range => range.empty ? range.head >= node.from && range.head <= node.to : range.from < node.to && range.to > node.from);
       const className = 'link-syntax' + (expanded ? ' expanded' : '');
       mark(node.from, marks[0].to, className); mark(marks[1].from, node.to, className);
     }
@@ -44,10 +47,18 @@ export function inlineDecorations(state: EditorState, tree: Tree, from: number, 
   return result;
 }
 export function cellInlinePresentation() {
-  const field = StateField.define<DecorationSet>({
-    create: state => Decoration.set(inlineDecorations(state, syntaxTree(state), 0, state.doc.length), true),
-    update: (value, transaction) => transaction.docChanged || transaction.selection ? Decoration.set(inlineDecorations(transaction.state, syntaxTree(transaction.state), 0, transaction.state.doc.length), true) : value,
-    provide: field => EditorView.decorations.from(field)
-  });
-  return field;
+  const focusEffect = StateEffect.define<null>();
+  const plugin = ViewPlugin.fromClass(class {
+    decorations: DecorationSet = Decoration.none;
+    constructor(readonly view: EditorView) { this.refresh(); }
+    refresh() {
+      const state = this.view.state, focused = this.view.dom.contains(this.view.contentDOM.ownerDocument.activeElement);
+      this.decorations = Decoration.set(inlineDecorations(state, syntaxTree(state), 0, state.doc.length, emptyReferences, focused), true);
+    }
+    update(update: ViewUpdate) { if (update.docChanged || update.selectionSet || update.focusChanged || update.startState !== update.state) this.refresh(); }
+  }, { decorations: value => value.decorations });
+  const changed = (_event: Event, view: EditorView) => {
+    queueMicrotask(() => { if (view.dom.isConnected) view.dispatch({ effects: focusEffect.of(null) }); }); return false;
+  };
+  return [plugin, EditorView.domEventHandlers({ focus: changed, blur: changed })];
 }

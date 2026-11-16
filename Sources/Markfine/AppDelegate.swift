@@ -260,11 +260,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         if action == "preferences" { showPreferences() }
         else if action == "closeWindow" { window?.performClose(nil) }
         else {
-            Task { @MainActor in
-                do {
-                    let handled = try await deliver(["kind": "hostCommand", "action": action]) as? Bool == true
-                    if !handled && ["copy", "cut", "paste", "undo", "redo"].contains(action) { NSApp.sendAction(Selector(action + ":"), to: nil, from: self) }
-                } catch { fail("hostDeliveryFailure", error) }
+            // Enqueue while handling the menu action, before subsequent keyboard IPC.
+            // An initial Task hop can let the first typed character overtake formatting.
+            enqueueDelivery(["kind": "hostCommand", "action": action]) { [weak self] result in
+                guard let self else { return }
+                switch result {
+                case .success(let value):
+                    if value as? Bool != true && ["copy", "cut", "paste", "undo", "redo"].contains(action) { NSApp.sendAction(Selector(action + ":"), to: nil, from: self) }
+                case .failure(let error): self.fail("hostDeliveryFailure", error)
+                }
             }
         }
     }
@@ -806,8 +810,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         }
     }
     private func deliver(_ fields: [String: Any]) async throws -> Any {
+        try await withCheckedThrowingContinuation { continuation in enqueueDelivery(fields) { continuation.resume(with: $0) } }
+    }
+    private func enqueueDelivery(_ fields: [String: Any], completion: @escaping @MainActor @Sendable (Result<Any, Error>) -> Void) {
         var payload = fields; payload["protocolVersion"] = 1; payload["sessionID"] = sessionID
-        return try await evaluate("return globalThis.markfine.receive(message)", arguments: ["message": payload])
+        webView.callAsyncJavaScript("return globalThis.markfine.receive(message)", arguments: ["message": payload], in: nil, in: world, completionHandler: completion)
     }
     private func evaluate(_ body: String, arguments: [String: Any], contentWorld: WKContentWorld? = nil) async throws -> Any {
         try await withCheckedThrowingContinuation { continuation in

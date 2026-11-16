@@ -1,11 +1,15 @@
 import { EditorSelection, Prec, type EditorState, type TransactionSpec } from '@codemirror/state';
 import { isolateHistory } from '@codemirror/commands';
 import { EditorView, keymap } from '@codemirror/view';
+import { editorMarkdownLanguage } from './editor-language';
 
 const pairs: Record<string, string> = { '(': ')', '[': ']', '{': '}', '"': '"', "'": "'", '`': '`', '（': '）', '【': '】', '〔': '〕', '［': '］', '｛': '｝', '“': '”', '‘': '’', '《': '》', '〈': '〉', '「': '」', '『': '』' };
 const closers = new Set(Object.values(pairs));
 export function punctuationTransaction(state: EditorState, from: number, to: number, text: string): TransactionSpec | null {
   if (state.readOnly || text.length !== 1 || state.selection.ranges.length !== 1) return null;
+  // Markdown backtick runs are delimiters, including multi-backtick spans and fences.
+  // Pairing/skipping alternate keystrokes here changes the syntax the user actually typed.
+  if (text === '`' && editorMarkdownLanguage.isActiveAt(state, from)) return null;
   const next = state.doc.sliceString(to, to + 1), previous = state.doc.sliceString(Math.max(0, from - 1), from);
   if (from === to && closers.has(text) && next === text) return { selection: EditorSelection.cursor(to + 1), userEvent: 'select.punctuation' };
   const close = pairs[text]; if (!close) return null;

@@ -22,7 +22,7 @@ def source_files():
     """Only shared product inputs; local tests and workspace files never affect the build."""
     files = [ROOT / "Package.swift", ROOT / "LICENSE", ROOT / "Config/Build.json", ROOT / "Config/Markfine.png", ROOT / "Config/Markfine.icns", ROOT / "Scripts/build.py", ROOT / "Scripts/draw-icon.swift", ROOT / "Scripts/draw-paper.py"]
     files += [ROOT / "Web/textures" / name for name in ["paper-texture.png", "kraft-texture.png"]]
-    files += [ROOT / "Web" / name for name in ["package.json", "package-lock.json", "tsconfig.json", "build.mjs", "index.html", "style.css"]]
+    files += [ROOT / "Web" / name for name in ["package.json", "package-lock.json", "tsconfig.json", "build.mjs", "codemirror-view-compatibility.mjs", "index.html", "style.css"]]
     for directory in ["Sources", "Web/src"]:
         files += [path for path in (ROOT / directory).rglob("*") if path.is_file() and path.suffix in [".swift", ".ts"]]
     return sorted(files)
