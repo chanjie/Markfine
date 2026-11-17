@@ -183,6 +183,11 @@ export class EditorApplication {
       if (event.metaKey || event.ctrlKey) { event.preventDefault(); this.zoomBy(Math.exp(-event.deltaY * .003)); }
       else { this.positionJump++; this.findGeneration++; cancelAnimationFrame(this.centerFrame); this.centerFrame = 0; for (const element of byID('main').querySelectorAll<HTMLElement>('.cm-scroller,.reader,pre,table,.diagram')) stopScroll(element); }
     }, { passive: false });
+    byID('main').addEventListener('scroll-indicator-start', () => {
+      this.documentTransition.cancel(); this.positionJump++; this.findGeneration++;
+      cancelAnimationFrame(this.centerFrame); this.centerFrame = 0;
+      for (const element of byID('main').querySelectorAll<HTMLElement>('.cm-scroller,.reader,pre,table,.diagram')) stopScroll(element);
+    });
     byID('editor').addEventListener('pointerdown', event => {
       if (event.button !== 0 || isContextGesture(event)) return;
       this.documentTransition.cancel(); this.findGeneration++;
@@ -507,7 +512,7 @@ export class EditorApplication {
     if (action === 'undo' || action === 'redo') {
       const cell = tableHasFocus(this.view);
       if (action === 'undo') undo(this.view); else redo(this.view);
-      if (cell) focusTableSelection(this.view);
+      if (cell && !focusTableSelection(this.view)) this.view.focus();
       // This editor owns the command even when its history is empty. Falling
       // through to WebKit's DOM undo would create a second document history.
       return true;
