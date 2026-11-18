@@ -17,6 +17,7 @@ final class PreferencesController: NSObject, NSComboBoxDataSource, NSComboBoxDel
     private var fonts: [(title: String, value: String)] = []
     private var filteredFonts: [String: [(title: String, value: String)]] = [:]
     private var spacingFields: [String: NSTextField] = [:]
+    private var recentLimitField: NSTextField?
     init(settings: ApplicationSettings, storage: S3Settings = S3Settings(vault: KeychainVault())) { self.settings = settings; self.storage = storage }
     func show() {
         if panel == nil {
@@ -102,6 +103,15 @@ final class PreferencesController: NSObject, NSComboBoxDataSource, NSComboBoxDel
             let button = NSButton(checkboxWithTitle: settings.text(zh, en), target: self, action: #selector(changeCheckbox(_:)))
             button.identifier = NSUserInterfaceItemIdentifier(key); button.state = values[key] as? Bool == true ? .on : .off; stack.addArrangedSubview(button)
         }
+        let recentRow = NSStackView(); recentRow.orientation = .horizontal; recentRow.spacing = 10
+        let recentLabel = NSTextField(labelWithString: settings.text("最近记录上限", "Recent locations limit")); recentLabel.widthAnchor.constraint(equalToConstant: 130).isActive = true
+        let recentField = NSTextField(string: String(values["recentLimit"] as? Int ?? 20)); recentLimitField = recentField
+        recentField.identifier = NSUserInterfaceItemIdentifier("recentLimit"); recentField.target = self; recentField.action = #selector(changeRecentLimit(_:)); recentField.delegate = self
+        recentField.widthAnchor.constraint(equalToConstant: 65).isActive = true
+        recentRow.addArrangedSubview(recentLabel); recentRow.addArrangedSubview(recentField)
+        recentRow.addArrangedSubview(NSTextField(labelWithString: settings.text("条（0–1000，0 不记录）", "(0–1000; 0 disables history)"))); stack.addArrangedSubview(recentRow)
+        let recentNote = NSTextField(wrappingLabelWithString: settings.text("输入后按回车确认。调低上限会移除较早的超额记录，不删除文件。", "Press Return to apply. Lowering the limit removes older excess records, not files."))
+        recentNote.font = .systemFont(ofSize: 11); recentNote.textColor = .secondaryLabelColor; stack.addArrangedSubview(recentNote)
         let form = ImageStoragePreferences(storage: storage, settings: settings); storageForm = form; form.onChange = { [weak self] in self?.onStorageChange?() }; images.addArrangedSubview(form.makeView())
         stack = general
         let restore = NSButton(title: settings.text("恢复默认设置…", "Restore Defaults…"), target: self, action: #selector(restoreDefaults))
@@ -119,6 +129,10 @@ final class PreferencesController: NSObject, NSComboBoxDataSource, NSComboBoxDel
         guard let key = sender.identifier?.rawValue else { return }
         if let value = Double(sender.stringValue.replacingOccurrences(of: ",", with: ".")), settings.set(key, value) { onChange?() }
         sender.stringValue = String(format: "%g", settings.values[key] as? Double ?? 1.3)
+    }
+    @objc private func changeRecentLimit(_ sender: NSTextField) {
+        if let value = Int(sender.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)), settings.set("recentLimit", value) { onChange?() }
+        sender.stringValue = String(settings.values["recentLimit"] as? Int ?? 20)
     }
     @objc private func changePopup(_ sender: NSPopUpButton) {
         guard let key = sender.identifier?.rawValue, let value = sender.selectedItem?.representedObject as? String, settings.set(key, value) else { return }
@@ -143,6 +157,7 @@ final class PreferencesController: NSObject, NSComboBoxDataSource, NSComboBoxDel
         if settings.values[key] as? String != font.value, settings.set(key, font.value) { onChange?() }
     }
     func controlTextDidEndEditing(_ notification: Notification) {
+        if let field = notification.object as? NSTextField, field === recentLimitField { changeRecentLimit(field); return }
         if let field = notification.object as? NSTextField, !(field is NSComboBox), spacingFields[field.identifier?.rawValue ?? ""] === field { changeSpacingValue(field); return }
         guard let combo = notification.object as? NSComboBox, let key = combo.identifier?.rawValue else { return }
         if let font = fonts.first(where: { $0.title.caseInsensitiveCompare(combo.stringValue) == .orderedSame || $0.value.caseInsensitiveCompare(combo.stringValue) == .orderedSame }), settings.set(key, font.value) { onChange?() }
@@ -152,7 +167,7 @@ final class PreferencesController: NSObject, NSComboBoxDataSource, NSComboBoxDel
     @objc private func restoreDefaults() {
         guard let panel else { return }
         let alert = NSAlert(); alert.messageText = settings.text("恢复默认偏好设置？", "Restore default preferences?")
-        alert.informativeText = settings.text("恢复外观、编辑和图片粘贴位置的默认设置。文档、附件、最近记录和S3凭据保留。", "Restore default appearance, editing and image paste settings. Documents, attachments, recent locations and S3 credentials are kept.")
+        alert.informativeText = settings.text("恢复默认偏好；最近记录上限恢复为20条，超额的旧记录会移除。文档、附件和S3凭据保留。", "Restore default preferences. The recent limit returns to 20, removing older excess records. Documents, attachments and S3 credentials are kept.")
         alert.addButton(withTitle: settings.text("恢复默认", "Restore Defaults")); alert.addButton(withTitle: settings.text("取消", "Cancel"))
         alert.beginSheetModal(for: panel) { [weak self] response in
             guard response == .alertFirstButtonReturn, let self else { return }; self.settings.reset(); self.storage.useLocal(); self.onStorageChange?(); self.onChange?(); self.rebuild()

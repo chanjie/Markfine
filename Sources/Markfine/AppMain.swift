@@ -20,6 +20,7 @@ struct MarkfineMain {
             }
             let delegate = AppDelegate(resources: resources)
             application.delegate = delegate
+            delegate.prepareNotifications()
             withExtendedLifetime(delegate) { application.run() }
         } catch {
             let event = DiagnosticEvent("launchFailure", level: "critical", error: error)

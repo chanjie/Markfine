@@ -18,7 +18,7 @@ python3 Scripts/build.py --configuration debug
 
 构建不会启动或安装应用，不会改默认文件关联。Swift scratch/cache 和 Web 输出位于 `Build/Product/`，包位于 `Dist/<版本-构建-输入摘要>/<本次构建>/`；历史输出不覆盖。`BUILD.json` 只记录构建/架构/资源/签名事实，不表示功能或性能验收通过。
 
-原生目标分别在 `Build/Product/Swift/arm64` 与 `x86_64` 编译，再由 `lipo` 合成通用可执行文件；Web 资源只构建一次。构建检查两个薄可执行文件的架构、合并结果的两种系统运行时依赖、签名及解压后的架构和字节一致性。`BUILD.json` 中 `architecture` 为 `universal`，`architectures` 为 `arm64`／`x86_64`。可用已有 Rosetta 做独立的 Intel 转译检查，报告单独列出 Intel 真机与其他系统版本的验证状态。
+主程序分别在 `Build/Product/Swift/arm64` 与 `x86_64` 编译；Quick Look 扩展使用 Command Line Tools 的 `swiftc` 和系统扩展入口分别编译两种架构，再各自由 `lipo` 合成通用可执行文件。Web 资源只构建一次。扩展先独立以沙盒权限签名，再签名主程序；构建检查两种架构的系统运行时依赖、签名、扩展元数据及解压后的资源一致性。`BUILD.json` 中 `architecture` 为 `universal`，`architectures` 为 `arm64`／`x86_64`。可用已有 Rosetta 做独立的 Intel 转译检查，报告单独列出 Intel 真机与其他系统版本的验证状态。
 
 每批需求完成验证后，将选定的最终 Release 包整理为易找的交付入口（中途构建不自动发布）：
 
@@ -52,7 +52,8 @@ python3 Scripts/release.py Dist/<最终构建目录>/<本次构建> --notes <本
 | `Web/src/paired-punctuation.ts` | 默认成对标点输入、跳过与删除；不接管组词和粘贴 |
 | `Web/src/markdown-input.ts`、`markdown-input-state.ts` | 新列表前缀的短暂输入状态、必要分隔事务、正文Tab与列表项结构缩进；状态声明独立于格式命令，不增加正文副本 |
 | `Sources/Markfine/PreferencesController.swift`、`NativeStrings.swift` | 原生首选项与中英文菜单；外链仅原生用户动作处理器打开 |
-| `Sources/MarkfineCore/WorkspaceStore.swift`、`RecentLocations.swift` | 用户选定文件夹的描述符／ID／代次登记、按层枚举与最近20条记录；不扩展图片授权 |
+| `Sources/MarkfineCore/WorkspaceStore.swift`、`RecentLocations.swift` | 用户选定文件夹的描述符／ID／代次登记、按层枚举与可调整的最近记录；不扩展图片授权 |
+| `Sources/MarkfineQuickLook/PreviewProvider.swift`、`Web/src/quicklook.ts` | 只读沙盒中的系统 Quick Look 静态预览、离线 Markdown 与文档范围内的有界图片读取 |
 | `Sources/MarkfineCore/LocationOpenQueue.swift`、`Web/src/preview-state.ts` | 串行完成用户打开操作至文档登记；回执时复核预览、组词、编辑与任务状态 |
 | `Sources/MarkfineCore/ReadingPositions.swift`、`RuntimeDataStore.swift` | 全局路径哈希导航元数据；描述符相对运行缓存清理与活跃会话锁，不管理文档资源 |
 | `Sources/MarkfineCore/DocumentExport.swift`、`Sources/Markfine/DocumentOutputController.swift` | 离线 OOXML ZIP 写出、独立静态排版 WebView、系统导出／打印面板 |
@@ -67,6 +68,7 @@ python3 Scripts/release.py Dist/<最终构建目录>/<本次构建> --notes <本
 | `Sources/Markfine/S3ImageService.swift`、`ImageStoragePreferences.swift` | 串行图片读取／暂存复用、原生S3表单与配置操作票据 |
 | `Sources/Markfine/RichClipboard.swift`、`Sources/MarkfineCore/ClipboardArchive.swift` | 原生富文本编码、受限自包含Markdown副本；剪贴板仅明确用户复制／粘贴时访问 |
 | `Sources/MarkfineCore/DiagnosticLog.swift`、`Sources/Markfine/ExportNotifications.swift` | 内容最小化结构化本地日志与本地系统通知；不注册远程推送 |
+| `Sources/Markfine/FinderReveal.swift` | 通知点击后的 Finder 文件定位与一次性应用焦点交接请求；系统决定是否置前 |
 | `Config/Markfine.png`、`Markfine.icns` | 原创 AI 主题图标；本地离屏绘制源为 `Scripts/draw-icon.swift`，构建摘要包含图标 |
 | `Web/textures/*.png`、`Scripts/draw-paper.py` | 原创无缝2x纸浆／纤维静态材质及可复现绘制源；PNG随包校验，绘制不在运行时执行 |
 | `Web/build.mjs` | 本地 bundle、精确依赖核对、许可归属和资源清单；不查找/编译测试 |
@@ -88,7 +90,7 @@ python3 Scripts/release.py Dist/<最终构建目录>/<本次构建> --notes <本
 - 普通正文专注按显式源换行划分，自动折行仍同属一段；列表项及代码／表格保留结构范围。空标题与前缀编辑位置不能使用零字号隐藏插入点；原生caret规则须覆盖CodeMirror默认主题，并共用于单元格。滚动条样式按空闲隐藏、滚动时显示设计，并保留固定滚动留白；用户反馈实际界面仍会常驻，问题未解决。
 - 长标签文字通过独立裁切窗口移动，关闭／未保存控件不移动。仅对溢出的活动／悬停标签运行动画；标签未变化时保持DOM身份，避免每个字符重启滚动。后台及系统减少动态效果均有静态处理，不新增持续JavaScript帧循环。
 - 原生 `initialize` 附带 `preferences`：`shortcutHints/focusMode/lineNumbers` 布尔值，`language(system/zh-Hans/en)` 与解析后的 `locale`，`timeZone(local/UTC)`、两个字体 PostScript 名、`editTheme/readTheme(paper/kraft/eye)`、`appearance(system/light/dark)`、`leftWidth/rightWidth(180…360)`、`editLineSpacing/readLineSpacing(0.75…2.5)`、`editZoom/readZoom(0.5…2)`。旧 `outlineWidth` 仅作宽度迁移兼容。行距为旧包各模式实际行高的相对倍数，默认1.3：排版编辑基准1.4，源码／阅读1.85；代码与表格分别沿用自身旧基准。根编辑器规则必须以足够CSS优先级覆盖CodeMirror，否则普通编辑仍会固定1.4。导出使用当前模式乘算后的实际值，不能把1.3直接当CSS行高。原生 UserDefaults 按系统用户持久化，Web 全字段校验并更新显示，不改文档历史。阅读模式为当前窗口的临时状态，不持久化。
-- Web `setPreference(key,value)` 仅接受固定白名单及严格布尔／数值／枚举类型；新增 `outlineSide(left/right)`、`showAllFiles`。目录拖动结束、缩放去抖提交；原生只持久化 Web 已验证的变更，不回传整套旧偏好覆盖进行中的手势。原生设置／恢复默认仍发送 `preferences`，Web 只更新有差异的编辑选项和字体规则。恢复默认只移除偏好白名单，不能清整个 UserDefaults domain 或最近记录。
+- Web `setPreference(key,value)` 仅接受固定白名单及严格布尔／数值／枚举类型；目录拖动结束、缩放去抖提交；原生只持久化 Web 已验证的变更，不回传整套旧偏好覆盖进行中的手势。原生设置／恢复默认仍发送 `preferences`，Web 只更新有差异的编辑选项和字体规则。恢复默认只移除偏好白名单，不清整个 UserDefaults domain；最近记录上限恢复为20时按新上限裁减。
 - `readingMode(enabled)` 仅控制应用内窗口样式，不修改 NSApp presentation options、Dock、系统菜单或窗口大小。菜单新增 `toggleSource`，排版／源码通过 StateEffect 和 Compartment 在同一 EditorView 上重配置，不能重建正文／选区／撤销历史。
 - 链接打开或激活另一文档时，在同一编辑状态切换后先完成章节的即时定位，再以约200ms淡入及14px横移呈现；同文档继续使用原滚动动画。动画只改变正文容器及标题的呈现，不克隆文档DOM、不重建历史、不推迟原生文档登记。新切页／输入／滚轮及减少动态效果设置变化取消旧动画；后台测量暂停时有定时恢复可见性的保护。
 - 阅读 DOM 是当前正文的临时完整渲染，不保存第二份编辑状态。进入时保留 CodeMirror 正文／选区／历史，隐藏编辑 DOM 并禁用修改动作；退出恢复同一视图。源文档行号与阅读块起始行号明确区分。
@@ -106,9 +108,9 @@ python3 Scripts/release.py Dist/<最终构建目录>/<本次构建> --notes <本
 - 原生发送`imageStorage`只包含粘贴位置和已配置图片根地址，不传凭据。S3配置只能原生表单写入；`resolvePaste(retry|local)`仅能处理已失败待决的同一图片任务。待决任务保留原剪贴板图片数据，重试不重新读取系统剪贴板；运行中配置变化取消旧上传，迟到回执按代次拒绝。
 - 标签关闭使用带 revision 的 `closeDocument/closeReceipt`。全部关闭使用原生请求、Web 逐文档决策、最终短冻结与 `closeAllResult/closeAllReceipt`；保存/图片/新输入均不得绕过确认。
 - 新命令必须同时更新原生 schema、Web 发送/接收、失效/重放处理及接口说明，不能允许文档传任意路径或扩展成系统命令通道。
-- 导航消息 `rememberPosition(documentID,mode,line,fraction)` 只存行／块比例，路径由原生登记文档提供，批准关闭后持久化；装载 `resume` 供5秒显式跳转。最近记录由原生发送 `recentLocations` 带不透明条目ID，`openRecent(entryID)` 不接受路径；清除位置记录发送 `clearPositions`。
+- 导航消息 `rememberPosition(documentID,mode,line,fraction)` 只存行／块比例，路径由原生登记文档提供，批准关闭后持久化；装载 `resume` 供5秒显式跳转。最近记录由原生发送 `recentLocations` 带不透明条目ID，`openRecent(entryID)`、`removeRecent(entryIDs)` 不接受路径；`clearRecent` 清除两类来源，`home` 清空活动标题但不关闭文档或文件夹；清除位置记录发送 `clearPositions`。
 - `exportDocument(documentID,printing,mode)` 只由菜单／用户动作触发，`mode`仅接受edit／source／read以选择当前呈现对应的全局行距基准，不能接收任意排版值或路径。原生系统面板决定输出URL。原生调用 `exportSnapshot(id)` 获取 `{html,resources}`，图片仍经同文档 ImageStore 授权读取并经ImageIO尺寸预检和后台有界转换；独立非持久静态WebView通过DOM属性替换内嵌资源，不能正则扫描／全局替换文档文字。等待字体／图片／图表完成后输出。
-- DOCX以语义树生成OOXML和去重内嵌图片，只跨进程回传短图片ID及各图片的一份编码；编号先写全部abstractNum再写num。PDF不生成Word对象树，按可见文字行、图片／图表及表格行计算有限分页边界，再由WebKit逐区域生成保留文本的PDF、CoreGraphics合成带页边距的A4，不用整页截图替代正文。系统打印使用生成的PDF经PDFKit呼出面板，不直接循环WebKit的NSPrintOperation。
+- DOCX以语义树生成OOXML和去重内嵌图片，只跨进程回传短图片ID及各图片的一份编码；编号先写全部abstractNum再写num。PDF不生成Word对象树，按可见文字行、图片／图表及表格行计算有限分页边界，再由WebKit逐区域生成保留文本的PDF、CoreGraphics合成带页边距的A4，并以PDFKit按标题和分页坐标生成书签；不用整页截图替代正文。系统打印使用生成的PDF经PDFKit呼出面板，不直接循环WebKit的NSPrintOperation。
 - 输出安全上限：512图片引用、64MiB输入图片、96MiB转换PNG／32M累计像素、源图预检100M像素、输出栅格最长边2400px；PDF最多1000页、捕获128MiB、最终200MiB。不以截断内容冒充成功；超限或资源失败保护当前编辑及已有输出，输出原子写入。
 - `filesSide(left/right)` 与 `outlineSide` 独立。原生窗口自创建起使用固定的标准AppKit标题栏，不启用 `fullSizeContentView`，不在阅读切换中修改styleMask／窗口外框。Web内容始终位于原生标题栏下方，不再模拟32px标题栏或发送 `zoomWindow`；拖窗及双击系统偏好由AppKit处理。正文列宽直接按实际滚动视口用CSS约束，保留稳定滚动条留白，避免长短文档的滚动条切换改变宽度；根内容列的flex-basis固定为auto，避免CodeMirror保留的窄视口测量在滚动重绘后覆盖应用列宽。不缓存JS视口宽度、不增加布局containment。两侧导航可临时收窄但不自动重写已存宽度。
 - 文件夹消息：原生 `workspace({generation,root})` 登记一次用户选择；Web `workspaceChildren(folderID,generation,showAll,requestID)`，原生返回同字段及 `entries`；Web `openWorkspaceEntry(entryID,generation,requestID)` 仅请求已登记条目。原生返回 `load/activate` 携带 `openRequestID` 与 `preview`，仅最新请求可激活。临时替换经原 closeDocument revision 协调，编辑／保存／任务中页面不自动替换。
@@ -117,7 +119,8 @@ python3 Scripts/release.py Dist/<最终构建目录>/<本次构建> --notes <本
 - WorkspaceStore 固定根描述符并验证磁盘身份，子目录逐层 `openat(O_NOFOLLOW)`；枚举使用独立 open file description，不以 dup 共享目录游标。目录代次、符号链接、失败及旧回执均要校验，不能把打开文件夹等同于所有文档图片可读整个根。
 - 文件树保留原条目路径至描述符检查，不先解析符号链接。`fileSelection`返回原生URL与已核对身份，`FileDocumentStore.open(expectedIdentity:)`在读取正文前核对descriptor的设备／inode，读取后仍复查根与代次。
 - 文本支持UTF-8与BOM标记的UTF-16/32；解码往返验证，不丢弃字节。打开／原编码保存上限16MiB，包含BOM；Web按装载时原生登记的编码预检，原生编码器仍作最终限制。保存桥接快照的UTF-8传输上限为24MiB，以容纳合法UTF-16文本的展开，不扩大磁盘文件上限。换行位置在同一EditorState字段随changes与undo映射，不建第二份正文。纯文本原生会话不登记ImageStore，保存不迁移图片，复制／粘贴仅文本，导出按转义原文处理。
-- `RecentLocations`按来源保存有界元数据：直接记录与仅文件夹来源各最多20条，展示最多20条；`showWorkspaceRecents`默认false。旧URL数组惰性迁移为直接／未知来源，不回扫文件夹推断历史。原生菜单与Web空白页共用已过滤的不透明ID列表；恢复默认只关闭开关，清空记录才清两类历史。
+- `RecentLocations`按来源保存有界元数据：两类来源合计最多 `recentLimit` 条（默认20、范围0–1000），按时间裁减后再应用 `showWorkspaceRecents` 过滤。旧URL数组惰性迁移为直接／未知来源，不回扫文件夹推断历史；启动和降低上限均裁减超额旧记录，0停止新增。原生菜单与主页共用已过滤的不透明ID列表，单条／批量移除不访问文件；恢复默认上限时也裁减超额记录。
+- Quick Look 数据扩展在独立沙盒中使用 JavaScriptCore 生成静态 HTML，不授予网络客户端权限，不依赖主程序启动或读取主程序偏好；CSP 禁止脚本和网络。文档及本地图片有大小／像素预算，图片相对文档目录逐层 `openat` 且不跟随符号链接，系统拒绝时占位。Mermaid 输出源码。扩展由 macOS 注册和选择，不代替 Finder 或改变默认文件关联。
 - 复制范围不通过改变选区来生成；进度及成功反馈采用独立fixed覆盖层，只有原生成功回执才短暂显示成功。无选区复制成功时，以CodeMirror公开源位置与单元格视图读取可见文本的DOM Range坐标，合并同一行的重叠框，裁切到滚动视口后短暂覆盖；不创建选区、不在编辑DOM插入标记。约1秒自动清理，滚动／输入／调窗／切页取消；减少动态效果时保留静态短暂反馈。正文右键使用受控复制／剪切／粘贴菜单，阻止WebKit原生菜单自动选词；右键与Control单击不进入正文拖选。菜单焦点使用preventScroll，不把DOM事件检查视为物理右键验收。
 - `WorkspaceEntry.modified` 是无跟随 stat 得到的毫秒时间。进入文件导航可请求 `workspaceMetadata(entryIDs,generation,requestID)`，每批最多4096个已登记UUID；回执同代次／请求加 `dates`，只刷新现有DOM时间，不重建点击目标、不读文件正文、不递归遍历。左右栏各有贯穿可用高度的键盘／指针分隔条，同侧目录与文件树共享宽度。
 - `diagnostic(event)` 只接受固定事件枚举，不允许正文、URL、路径、堆栈或任意消息字段。Web同类事件5秒节流；原生捕获到的Error只提取类型、白名单错误域和码，绝不序列化NSError.userInfo／localizedDescription；POSIX失败保留真正errno而非Swift枚举序号。`RuntimeDataStore.record` 与清理共用管理锁，每次通过 `openat(O_NOFOLLOW)` 重新打开固定文件，拒绝符号链接／硬链接和特殊文件，五份约2MiB轮转。不能因日志写入失败递归产生日志。

@@ -98,6 +98,9 @@ export class EditorApplication {
   private readingLocale = '';
   private readingPosition = 0;
   private wasEmpty = true;
+  private recentItems: { id: string; name: string; path: string }[] = [];
+  private managingRecents = false;
+  private selectedRecents = new Set<string>();
   private collapsed = new Map<string, Set<number>>();
   private hintTimer = 0;
   sourceEditing = false;
@@ -148,6 +151,17 @@ export class EditorApplication {
       ], 'ordered-list-menu', true);
     });
     byID<HTMLInputElement>('show-workspace-recents').onchange = event => { const value = (event.target as HTMLInputElement).checked; this.applyPreferences({ showWorkspaceRecents: value }); this.persistPreference('showWorkspaceRecents', value); };
+    byID('show-home').onclick = () => this.showHome();
+    byID('manage-recents').onclick = () => { this.managingRecents = !this.managingRecents; this.selectedRecents.clear(); this.renderRecent(this.recentItems); };
+    byID('select-recents').onclick = () => {
+      this.selectedRecents = this.selectedRecents.size === this.recentItems.length ? new Set() : new Set(this.recentItems.map(item => item.id));
+      for (const box of document.querySelectorAll<HTMLInputElement>('#recent-list input[data-recent-id]')) box.checked = this.selectedRecents.has(box.dataset.recentId!);
+      this.updateRecentSelectionControls();
+    };
+    byID('remove-recents').onclick = () => { if (this.selectedRecents.size) this.post('removeRecent', { entryIDs: [...this.selectedRecents] }); };
+    byID('clear-recents').onclick = () => byID<HTMLDialogElement>('clear-recents-dialog').showModal();
+    byID('cancel-clear-recents').onclick = () => byID<HTMLDialogElement>('clear-recents-dialog').close();
+    byID('confirm-clear-recents').onclick = () => { byID<HTMLDialogElement>('clear-recents-dialog').close(); this.post('clearRecent'); };
     byID('toggle-outline').onclick = () => this.toggleOutline();
     byID('hide-outline').onclick = () => this.toggleOutline();
     byID('toggle-files').onclick = () => this.toggleFiles();
@@ -448,6 +462,20 @@ export class EditorApplication {
     if (!byID('find-panel').hidden) this.highlights.set(byID<HTMLInputElement>('query').value);
     this.offerResume(next);
     return true;
+  }
+  private showHome(): void {
+    if (this.composing() || this.closing || document.querySelector('dialog[open]')) return;
+    if (this.reading) this.setReading(false);
+    const item = this.active;
+    if (item && this.view) {
+      this.rememberPosition(); item.state = this.view.state;
+      item.scroll = this.viewportSnapshot(); item.scrollLeft = this.view.scrollDOM.scrollLeft;
+      stopScroll(this.view.scrollDOM);
+    }
+    this.hideFind(); this.documentTransition.cancel(); this.copyHighlight.clear(); this.dismissResume();
+    this.positionJump++; this.findGeneration++; cancelAnimationFrame(this.centerFrame); this.centerFrame = 0;
+    this.latestOpenRequest = ''; this.openRequests.clear(); this.activeID = '';
+    this.post('home'); this.applyLayout(); this.renderChrome(); byID('show-home').focus({ preventScroll: true });
   }
   private switchTab(direction: number): void {
     const ids = [...this.documents.keys()]; if (!ids.length) return;
@@ -970,15 +998,16 @@ export class EditorApplication {
     byID('toggle-files').hidden = !this.workspaceBrowser.root;
     byID('toggle-files').setAttribute('aria-expanded', String(!this.filesHidden));
     byID('files-content').inert = this.filesHidden || this.reading;
-    byID('recent-panel').hidden = !!item || !!this.workspaceBrowser.root;
+    byID('recent-panel').hidden = !!item;
     byID('empty').hidden = !!item;
+    byID('show-home').setAttribute('aria-pressed', String(!item));
     if (!item && !this.wasEmpty) renderEmptyState(true); this.wasEmpty = !item;
     byID<HTMLButtonElement>('toggle-reading').disabled = !item || item.unsupported;
     byID<HTMLButtonElement>('toggle-source').disabled = !item || item.unsupported || item.textFile;
     byID<HTMLButtonElement>('zoom-button').disabled = !item || item.unsupported;
     byID('toggle-source').setAttribute('aria-pressed', String(this.sourceEditing));
     byID('unsupported').hidden = !item?.unsupported; byID('unsupported-name').textContent = item?.unsupported ? item.title : '';
-    byID('editor').hidden = this.reading || !!item?.unsupported;
+    byID('editor').hidden = !item || this.reading || !!item.unsupported;
     const title = byID('document-title');
     title.replaceChildren();
     if (item) { const name = document.createElement('span'); name.className = 'document-name'; name.textContent = this.displayTitle(item); title.append(fileIcon(item.textFile ? item.language ? 'code' : 'text' : 'markdown'), name); }
@@ -1100,8 +1129,8 @@ export class EditorApplication {
     this.imageControls.refresh();
   }
   private scheduleCenter(): void {
-    if (this.reading || this.pointerSelecting || this.composing() || this.centerFrame ||this.view&&tableHasRange(this.view)) return;
-    this.centerFrame = requestAnimationFrame(() => { this.centerFrame = 0; if (this.view && !this.reading && !this.pointerSelecting && !this.composing()) centerCaret(this.view); });
+    if (!this.active || this.reading || this.pointerSelecting || this.composing() || this.centerFrame ||this.view&&tableHasRange(this.view)) return;
+    this.centerFrame = requestAnimationFrame(() => { this.centerFrame = 0; if (this.active && this.view && !this.reading && !this.pointerSelecting && !this.composing()) centerCaret(this.view); });
   }
   setReading(enabled: boolean): void {
     if (enabled === this.reading || this.composing() || enabled && (!this.active || this.active.unsupported || this.pasteJob)) return;
@@ -1276,12 +1305,36 @@ export class EditorApplication {
     }
   }
   private renderRecent(items: { id: string; name: string; path: string }[]): void {
+    this.recentItems = items;
+    const ids = new Set(items.map(item => item.id));
+    this.selectedRecents = new Set([...this.selectedRecents].filter(id => ids.has(id)));
     byID('recent-list').replaceChildren(); byID('recent-empty').hidden = items.length > 0;
-    for (const item of items) { const button = document.createElement('button'); button.className = 'recent-item'; button.title = item.path; const name = document.createElement('span'), path = document.createElement('small'); name.textContent = item.name; path.textContent = item.path; button.append(name, path); button.onclick = () => this.post('openRecent', { entryID: item.id }); byID('recent-list').append(button); }
+    byID('recent-actions').hidden = !this.managingRecents;
+    byID('manage-recents').textContent = this.managingRecents ? t('完成', 'Done') : t('整理', 'Manage');
+    this.updateRecentSelectionControls();
+    for (const item of items) {
+      const row = document.createElement('div'); row.className = 'recent-row';
+      if (this.managingRecents) {
+        const check = document.createElement('input'); check.type = 'checkbox'; check.dataset.recentId = item.id; check.checked = this.selectedRecents.has(item.id);
+        check.setAttribute('aria-label', `${t('选择', 'Select')} ${item.name}`);
+        check.onchange = () => { if (check.checked) this.selectedRecents.add(item.id); else this.selectedRecents.delete(item.id); this.updateRecentSelectionControls(); };
+        row.append(check);
+      }
+      const button = document.createElement('button'); button.className = 'recent-item'; button.title = item.path;
+      const name = document.createElement('span'), path = document.createElement('small'); name.textContent = item.name; path.textContent = item.path;
+      button.append(name, path); button.onclick = () => this.post('openRecent', { entryID: item.id }); row.append(button);
+      const remove = document.createElement('button'); remove.className = 'recent-remove'; remove.textContent = '×'; remove.setAttribute('aria-label', `${t('移除记录', 'Remove record')} ${item.name}`);
+      remove.onclick = () => this.post('removeRecent', { entryIDs: [item.id] }); row.append(remove); byID('recent-list').append(row);
+    }
+  }
+  private updateRecentSelectionControls(): void {
+    byID<HTMLButtonElement>('remove-recents').disabled = !this.selectedRecents.size;
+    byID<HTMLButtonElement>('select-recents').disabled = !this.recentItems.length;
+    byID('select-recents').textContent = this.recentItems.length && this.selectedRecents.size === this.recentItems.length ? t('取消全选', 'Deselect all') : t('全选', 'Select all');
   }
   async exportSnapshot(id: string): Promise<{ html: string; resources: string[] }> {
     const item = this.documents.get(id); if (!item || item.unsupported || item.imageLocked || this.composing()) throw new Error(t('当前文档暂时无法导出', 'The document cannot be exported right now'));
-    return item.textFile ? textSnapshot(item.state.doc.toString()) : exportHTML(item.state.doc.toString(), id, () => this.ensureMermaid());
+    return item.textFile ? textSnapshot(item.state.doc.toString()) : exportHTML(item.state.doc.toString(), id, () => this.ensureMermaid(), undefined, true);
   }
 }
 const application = new EditorApplication();

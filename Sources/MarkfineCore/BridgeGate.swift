@@ -25,11 +25,12 @@ public struct BridgeGate {
         let common: Set<String> = ["protocolVersion", "sessionID", "capability", "kind"]
         let fields: Set<String>
         switch kind {
-        case "ready", "new", "open", "loadMermaid", "closeEmptyWindow": fields = []
+        case "ready", "new", "open", "loadMermaid", "closeEmptyWindow", "clearRecent", "home": fields = []
         case "workspaceChildren": fields = ["folderID", "generation", "showAll", "requestID"]
         case "workspaceMetadata": fields = ["entryIDs", "generation", "requestID"]
         case "openWorkspaceEntry": fields = ["entryID", "generation", "requestID"]
         case "openRecent": fields = ["entryID"]
+        case "removeRecent": fields = ["entryIDs"]
         case "rememberPosition": fields = ["documentID", "mode", "line", "fraction"]
         case "exportDocument": fields = ["documentID", "printing", "mode"]
         case "diagnostic": fields = ["event"]
@@ -95,6 +96,10 @@ public struct BridgeGate {
         if kind == "workspaceChildren", !boolean(object["showAll"]) { throw BridgeFailure.malformed }
         if kind == "workspaceMetadata" {
             guard let ids = object["entryIDs"] as? [String], ids.count <= 4096, ids.allSatisfy({ UUID(uuidString: $0) != nil }) else { throw BridgeFailure.malformed }
+        }
+        if kind == "removeRecent" {
+            guard let ids = object["entryIDs"] as? [String], !ids.isEmpty, ids.count <= 1000,
+                  Set(ids).count == ids.count, ids.allSatisfy({ UUID(uuidString: $0) != nil }) else { throw BridgeFailure.malformed }
         }
         if kind == "setPreference" {
             guard let key = object["key"] as? String, let value = object["value"], ApplicationSettings.accepts(key, value) else { throw BridgeFailure.malformed }

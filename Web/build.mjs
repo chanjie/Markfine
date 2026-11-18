@@ -28,8 +28,11 @@ await writeFile(resolve(outdir, '../app-bundle.json'), JSON.stringify(result.met
 const diagrams = await build({ absWorkingDir: here, entryPoints: ['src/mermaid-runtime.ts'], outfile: resolve(outdir, 'mermaid-runtime.js'),
   bundle: true, format: 'iife', platform: 'browser', target: 'safari26', minify: true, legalComments: 'external', metafile: true, logLevel: 'info' });
 await writeFile(resolve(outdir, '../mermaid-bundle.json'), JSON.stringify(diagrams.metafile, null, 2) + '\n');
+const quicklook = await build({ absWorkingDir: here, entryPoints: ['src/quicklook.ts'], outfile: resolve(outdir, 'quicklook-render.js'),
+  bundle: true, format: 'iife', platform: 'browser', target: 'safari26', minify: true, legalComments: 'external', metafile: true, logLevel: 'info' });
+await writeFile(resolve(outdir, '../quicklook-bundle.json'), JSON.stringify(quicklook.metafile, null, 2) + '\n');
 const lock = JSON.parse(await readFile(resolve(here, 'package-lock.json'), 'utf8'));
-const bundledPackages = [...new Set([...Object.keys(result.metafile.inputs), ...Object.keys(diagrams.metafile.inputs)].flatMap(path => {
+const bundledPackages = [...new Set([...Object.keys(result.metafile.inputs), ...Object.keys(diagrams.metafile.inputs), ...Object.keys(quicklook.metafile.inputs)].flatMap(path => {
   const parts = path.split('/'), index = parts.lastIndexOf('node_modules');
   if (index < 0) return [];
   return [parts.slice(parts.indexOf('node_modules'), index + (parts[index + 1].startsWith('@') ? 3 : 2)).join('/')];

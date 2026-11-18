@@ -86,6 +86,8 @@ final class DocumentPrintRenderer: NSObject, WKNavigationDelegate {
     private var printed: CheckedContinuation<Void, Error>?
     private var watchdog: Task<Void, Never>?
     private var pageBreaks: [Double] = []
+    private struct Heading { let level: Int; let title: String; let y: Double }
+    private var headings: [Heading] = []
     private var printablePDF: PDFDocument?
     func prepare(snapshot: [String: Any], options: ExportOptions, word: Bool, image: (String) async throws -> LocalImage) async throws -> [String: Any] {
         guard options.valid, let html = snapshot["html"] as? String, html.utf8.count <= 32 * 1024 * 1024,
@@ -112,7 +114,7 @@ final class DocumentPrintRenderer: NSObject, WKNavigationDelegate {
         let page = """
         <!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'none'; base-uri 'none'; form-action 'none'">
         <style>\(faces)
-        *{box-sizing:border-box;font-synthesis:style}html,body{margin:0;padding:0;background:white;color:#171717}body{font:12\(unit)/\(options.lineSpacing) OutputLatin,OutputCJK,sans-serif;overflow-wrap:anywhere}p{text-indent:\(options.indent)em;margin:0 0 9\(unit)}li p,td p,th p{ text-indent:0 }h1,h2,h3,h4,h5,h6{line-height:1.3;break-after:avoid;margin:14\(unit) 0 8\(unit)}h1{font-size:20\(unit)}h2{font-size:16\(unit)}h3{font-size:14\(unit)}h4,h5,h6{font-size:12\(unit)}pre,code{font-family:Menlo,monospace}pre{font-size:10\(unit);white-space:pre-wrap;background:#f3f3f3;padding:9\(unit);text-indent:0}blockquote{border-left:2\(unit) solid #ccc;margin-left:0;padding-left:12\(unit)}table{width:100%;table-layout:fixed;border-collapse:collapse;font-size:11\(unit)}th,td{border:.5\(unit) solid #ccc;padding:5\(unit);vertical-align:top}th{background:#eee}thead{display:table-header-group}img,svg{max-width:100%;height:auto;max-height:675\(unit);object-fit:contain;break-inside:avoid}a{color:#315c80}hr{border:0;border-top:.5\(unit) solid #ccc}ul,ol{padding-left:24\(unit)}.diagram{margin:8\(unit) 0} .image-placeholder{font-size:10\(unit);color:#666}\(paginationCSS)</style></head><body><div id="page-clip"><article></article></div></body></html>
+        *{box-sizing:border-box;font-synthesis:style}html,body{margin:0;padding:0;background:white;color:#171717}body{font:12\(unit)/\(options.lineSpacing) OutputLatin,OutputCJK,sans-serif;overflow-wrap:anywhere}p{text-indent:\(options.indent)em;margin:0 0 9\(unit)}li p,td p,th p{ text-indent:0 }.output-image-block{text-indent:0;text-align:center}h1,h2,h3,h4,h5,h6{line-height:1.3;break-after:avoid;margin:14\(unit) 0 8\(unit)}h1{font-size:20\(unit)}h2{font-size:16\(unit)}h3{font-size:14\(unit)}h4,h5,h6{font-size:12\(unit)}pre,code{font-family:Menlo,monospace}pre{font-size:10\(unit);white-space:pre-wrap;background:#f3f3f3;padding:9\(unit);text-indent:0}blockquote{border-left:2\(unit) solid #ccc;margin-left:0;padding-left:12\(unit)}table{width:100%;table-layout:fixed;border-collapse:collapse;font-size:11\(unit)}th,td{border:.5\(unit) solid #ccc;padding:5\(unit);vertical-align:top}th{background:#eee}thead{display:table-header-group}img,svg{max-width:100%;height:auto;max-height:675\(unit);object-fit:contain;break-inside:avoid}a{color:#315c80}hr{border:0;border-top:.5\(unit) solid #ccc}ul,ol{padding-left:24\(unit)}.diagram{margin:8\(unit) 0} .image-placeholder{font-size:10\(unit);color:#666}\(paginationCSS)</style></head><body><div id="page-clip"><article></article></div></body></html>
         """
         try await withCheckedThrowingContinuation { continuation in
             loaded = continuation
@@ -124,6 +126,11 @@ final class DocumentPrintRenderer: NSObject, WKNavigationDelegate {
         }
         let result = try await view.callAsyncJavaScript(Self.snapshotScript, arguments: ["html": html, "resourceImages": resourceImages, "word": word], in: nil, contentWorld: .page) as? [String: Any] ?? [:]
         pageBreaks = result["breaks"] as? [Double] ?? []
+        headings = (result["headings"] as? [[String: Any]] ?? []).compactMap { item in
+            guard let level = item["level"] as? Int, (1...6).contains(level), let title = item["title"] as? String,
+                  !title.isEmpty, title.utf16.count <= 8192, let y = item["y"] as? Double, y.isFinite, y >= 0 else { return nil }
+            return Heading(level: level, title: title, y: y)
+        }
         return result
     }
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { watchdog?.cancel(); loaded?.resume(); loaded = nil }
@@ -140,7 +147,7 @@ final class DocumentPrintRenderer: NSObject, WKNavigationDelegate {
         guard (2...1001).contains(pageBreaks.count), pageBreaks.first == 0 else { throw DocumentExportFailure.pagination("Invalid page boundaries: \(pageBreaks.count)") }
         let output = NSMutableData(); var media = CGRect(x: 0, y: 0, width: 595.28, height: 841.89)
         guard let consumer = CGDataConsumer(data: output), let context = CGContext(consumer: consumer, mediaBox: &media, nil) else { throw CocoaError(.fileWriteUnknown) }
-        var capturedBytes = 0
+        var capturedBytes = 0, scales: [CGFloat] = []
         for index in 1..<pageBreaks.count {
             let start = pageBreaks[index - 1], height = pageBreaks[index] - start
             guard start.isFinite, height.isFinite, height > 0, height <= 930.53 else { throw DocumentExportFailure.pagination("Invalid page height: \(height)") }
@@ -151,6 +158,7 @@ final class DocumentPrintRenderer: NSObject, WKNavigationDelegate {
             let bounds = page.getBoxRect(.mediaBox)
             guard bounds.width.isFinite, bounds.height.isFinite, bounds.width > 0, bounds.height > 0, bounds.width <= 603.71, bounds.height <= height + 2 else { throw DocumentExportFailure.pagination("Unexpected WebKit region size \(bounds.width) × \(bounds.height), requested \(height)") }
             let scale = min(451.28 / bounds.width, 697.89 / bounds.height)
+            scales.append(scale)
             context.beginPDFPage(nil); context.saveGState()
             context.translateBy(x: 72, y: media.height - 72 - bounds.height * scale); context.scaleBy(x: scale, y: scale)
             context.translateBy(x: -bounds.minX, y: -bounds.minY); context.drawPDFPage(page)
@@ -158,7 +166,23 @@ final class DocumentPrintRenderer: NSObject, WKNavigationDelegate {
             guard output.length <= 200 * 1024 * 1024 else { throw DocumentExportFailure.tooLarge }
         }
         context.closePDF()
-        guard output.length <= 200 * 1024 * 1024 else { throw DocumentExportFailure.tooLarge }; return output as Data
+        guard output.length <= 200 * 1024 * 1024 else { throw DocumentExportFailure.tooLarge }
+        guard !headings.isEmpty else { return output as Data }
+        guard let document = PDFDocument(data: output as Data) else { throw CocoaError(.fileReadCorruptFile) }
+        let root = PDFOutline(); var parents: [(level: Int, item: PDFOutline)] = []
+        for heading in headings {
+            guard let index = (0..<scales.count).first(where: { heading.y >= pageBreaks[$0] && (heading.y < pageBreaks[$0 + 1] || $0 == scales.count - 1) }),
+                  let page = document.page(at: index) else { throw DocumentExportFailure.pagination("Heading outside output pages") }
+            while let last = parents.last, last.level >= heading.level { parents.removeLast() }
+            let parent = parents.last?.item ?? root, item = PDFOutline()
+            item.label = heading.title
+            item.destination = PDFDestination(page: page, at: NSPoint(x: 72, y: media.height - 72 - CGFloat(heading.y - pageBreaks[index]) * scales[index]))
+            parent.insertChild(item, at: parent.numberOfChildren)
+            parents.append((heading.level, item))
+        }
+        document.outlineRoot = root
+        guard let data = document.dataRepresentation(), data.count <= 200 * 1024 * 1024 else { throw DocumentExportFailure.tooLarge }
+        return data
     }
     func writePDF(to url: URL) async throws {
         let data = try await pdfData(); try data.write(to: url, options: .atomic)
@@ -212,7 +236,12 @@ final class DocumentPrintRenderer: NSObject, WKNavigationDelegate {
         if (end <= start || breaks.length > 1000) throw Error('Cannot paginate document safely');
         breaks.push(end);
       }
-      return {nodes:[],images:[],breaks};
+      const headings = [...article.querySelectorAll('h1,h2,h3,h4,h5,h6')].map(element => ({
+        level:Number(element.tagName.slice(1)), title:(element.textContent || '').replace(/\\s+/g,' ').trim(),
+        y:Math.max(0,element.getBoundingClientRect().top-origin)
+      })).filter(item => item.title);
+      if (headings.length > 20000) throw Error('Too many headings');
+      return {nodes:[],images:[],breaks,headings};
     }
     let pixels = 0, bytes = 0, rasterPixels = 0;
     const budget = (width,height,length) => { pixels += width * height; bytes += length; if (pixels > 32000000 || bytes > 134217728) throw Error('Export images exceed the output budget'); };
@@ -250,6 +279,7 @@ final class DocumentPrintRenderer: NSObject, WKNavigationDelegate {
       if (value.tag === 'a') value.href = node.getAttribute('href');
       if (value.tag === 'ol') value.start = Number(node.getAttribute('start') || 1);
       if (node.style.textAlign) value.align = node.style.textAlign;
+      if (value.tag === 'p' && node.classList.contains('output-image-block')) value.align = 'center';
       return value;
     };
     return {nodes:[...article.childNodes].map(convert).filter(Boolean),images,html:article.innerHTML};

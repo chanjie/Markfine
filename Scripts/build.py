@@ -79,7 +79,7 @@ def verify_binary(binary, env):
 def verify_resources(directory, input_id):
     manifest = json.loads((directory / "manifest.json").read_text())
     expected = manifest["files"]
-    required = {"index.html", "style.css", "app.js", "mermaid-runtime.js", "build-info.json", "ThirdPartyNotices.txt", "dependencies.json", "paper-texture.png", "kraft-texture.png"}
+    required = {"index.html", "style.css", "app.js", "mermaid-runtime.js", "quicklook-render.js", "build-info.json", "ThirdPartyNotices.txt", "dependencies.json", "paper-texture.png", "kraft-texture.png"}
     if manifest["format"] != 1 or manifest["inputID"] != input_id or not required.issubset(expected):
         raise RuntimeError("Resource manifest identity or required files differ")
     if set(path.name for path in directory.iterdir()) != set(expected) | {"manifest.json"}:
@@ -113,6 +113,8 @@ def build(configuration, env):
     run(["node", "build.mjs"], env, cwd=ROOT / "Web")
     run(["npm", "run", "check"], env, cwd=ROOT / "Web")
     binaries = []
+    preview_binaries = []
+    sdk = run(["xcrun", "--sdk", "macosx", "--show-sdk-path"], env).strip()
     for architecture in ARCHITECTURES:
         arguments = swift_arguments(configuration, architecture)
         run(arguments + ["--product", "Markfine"], env)
@@ -123,6 +125,15 @@ def build(configuration, env):
         if run(["lipo", "-archs", binary], env).split() != [architecture]:
             raise RuntimeError("Swift output architecture differs: " + architecture)
         binaries.append(binary)
+        preview = directory / ("MarkfineQuickLook-" + architecture)
+        run(["xcrun", "swiftc", "-sdk", sdk, "-target", architecture + "-apple-macos13.0",
+             "-O" if configuration == "release" else "-Onone", "-swift-version", "5", "-application-extension",
+             "-emit-executable", "-module-name", "MarkfineQuickLook", "-parse-as-library",
+             "-Xlinker", "-e", "-Xlinker", "_NSExtensionMain",
+             ROOT / "Sources/MarkfineQuickLook/PreviewProvider.swift", "-o", preview], env)
+        if run(["lipo", "-archs", preview], env).split() != [architecture]:
+            raise RuntimeError("Quick Look output architecture differs: " + architecture)
+        preview_binaries.append(preview)
     stage = "mvp" if config["stage"] == "mvp-candidate" else "dev"
     identifier = f"{config['version']}-{stage}.{config['build']}-{input_id[:12]}"
     output = ROOT / "Dist" / identifier / stamp
@@ -133,6 +144,29 @@ def build(configuration, env):
     shutil.copytree(directory / "Editor", app / "Contents/Resources/Editor")
     shutil.copy2(ROOT / "Config/Markfine.icns", app / "Contents/Resources/Markfine.icns")
     shutil.copy2(ROOT / "LICENSE", app / "Contents/Resources/LICENSE.txt")
+    extension = app / "Contents/PlugIns/MarkfineQuickLook.appex"
+    (extension / "Contents/MacOS").mkdir(parents=True, exist_ok=False)
+    (extension / "Contents/Resources").mkdir()
+    run(["lipo", "-create", *preview_binaries, "-output", extension / "Contents/MacOS/MarkfineQuickLook"], env)
+    shutil.copy2(directory / "Editor/quicklook-render.js", extension / "Contents/Resources/quicklook-render.js")
+    shutil.copy2(directory / "Editor/ThirdPartyNotices.txt", extension / "Contents/Resources/ThirdPartyNotices.txt")
+    extension_info = {
+        "CFBundleDevelopmentRegion": "zh_CN", "CFBundleExecutable": "MarkfineQuickLook",
+        "CFBundleName": "Markfine Quick Look", "CFBundleDisplayName": "Markfine Quick Look",
+        "CFBundleIdentifier": "local.markfine.Markfine.QuickLook", "CFBundleInfoDictionaryVersion": "6.0",
+        "CFBundlePackageType": "XPC!", "CFBundleShortVersionString": config["version"],
+        "CFBundleVersion": str(config["build"]), "LSMinimumSystemVersion": "13.0",
+        "NSExtension": {
+            "NSExtensionPointIdentifier": "com.apple.quicklook.preview",
+            "NSExtensionPrincipalClass": "MarkfineQuickLook.PreviewProvider",
+            "NSExtensionAttributes": {"QLIsDataBasedPreview": True, "QLSupportsSearchableItems": False,
+                                      "QLSupportedContentTypes": ["net.daringfireball.markdown"]}
+        }
+    }
+    (extension / "Contents/Info.plist").write_bytes(plistlib.dumps(extension_info))
+    entitlements = directory / "QuickLook.entitlements"
+    entitlements.write_bytes(plistlib.dumps({"com.apple.security.app-sandbox": True,
+                                             "com.apple.security.files.user-selected.read-only": True}))
     info = {
         "CFBundleDevelopmentRegion": "zh_CN", "CFBundleExecutable": "Markfine", "CFBundleName": "Markfine",
         "CFBundleDisplayName": "Markfine", "CFBundleIdentifier": "local.markfine.Markfine", "CFBundlePackageType": "APPL",
@@ -153,6 +187,9 @@ def build(configuration, env):
     (app / "Contents/Info.plist").write_bytes(plistlib.dumps(info))
     verify_resources(app / "Contents/Resources/Editor", input_id)
     architectures = verify_binary(app / "Contents/MacOS/Markfine", env)
+    verify_binary(extension / "Contents/MacOS/MarkfineQuickLook", env)
+    run(["codesign", "--force", "--sign", "-", "--timestamp=none", "--entitlements", entitlements, extension], env)
+    run(["codesign", "--verify", "--strict", "--verbose=2", extension], env)
     run(["codesign", "--force", "--sign", "-", "--timestamp=none", app], env)
     run(["codesign", "--verify", "--deep", "--strict", "--verbose=2", app], env)
     archive = output / ("Markfine-" + identifier + ".zip")
@@ -165,6 +202,12 @@ def build(configuration, env):
     run(["codesign", "--verify", "--deep", "--strict", "--verbose=2", unpacked / "Markfine.app"], env)
     verify_resources(unpacked / "Markfine.app/Contents/Resources/Editor", input_id)
     verify_binary(unpacked / "Markfine.app/Contents/MacOS/Markfine", env)
+    unpacked_extension = unpacked / "Markfine.app/Contents/PlugIns/MarkfineQuickLook.appex"
+    verify_binary(unpacked_extension / "Contents/MacOS/MarkfineQuickLook", env)
+    if (unpacked_extension / "Contents/Resources/quicklook-render.js").read_bytes() != (unpacked / "Markfine.app/Contents/Resources/Editor/quicklook-render.js").read_bytes():
+        raise RuntimeError("Quick Look renderer differs from the verified bundle")
+    if plistlib.loads((unpacked_extension / "Contents/Info.plist").read_bytes()) != extension_info:
+        raise RuntimeError("Quick Look extension metadata differs")
     if hashlib.sha256((app / "Contents/MacOS/Markfine").read_bytes()).digest() != hashlib.sha256((unpacked / "Markfine.app/Contents/MacOS/Markfine").read_bytes()).digest():
         raise RuntimeError("Unpacked application binary differs")
     if input_digest() != input_id:

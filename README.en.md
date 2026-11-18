@@ -47,6 +47,12 @@ When editing Mermaid, the source stays above the diagram. If the source contains
 
 Open a diagram in a larger view, zoom it independently and drag to explore without changing the document zoom. Flowcharts, sequence diagrams, class diagrams, state diagrams, ER diagrams and Gantt charts are all generated offline.
 
+### Export and Quick Look
+
+PDF exports include expandable, navigable heading bookmarks; Word exports retain heading levels for navigation. The bundled Finder extension can show formatted Markdown when you press Space. Mermaid appears as source, and local images depend on system access.
+
+Return Home without closing open documents or the folder. Remove recent locations individually or in batches, and choose how many to retain.
+
 ### Separate appearance settings for writing and reading
 
 Choose Paper or Kraft themes with static paper textures, an eye-comfort theme, or a dark appearance.

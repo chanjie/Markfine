@@ -96,7 +96,9 @@ public enum WordDocument {
             let listProperty = numbered.map { "<w:numPr><w:ilvl w:val=\"\(min(depth, 8))\"/><w:numId w:val=\"\($0)\"/></w:numPr>" } ?? ""
             switch node.tag {
             case "h1", "h2", "h3", "h4", "h5", "h6": return paragraph(inlines(children), properties: "<w:pStyle w:val=\"Heading\(node.tag.suffix(1))\"/>")
-            case "p": return paragraph(inlines(children), properties: listProperty, normal: numbered == nil)
+            case "p":
+                let centered = node.align == "center"
+                return paragraph(inlines(children), properties: listProperty + (centered ? "<w:jc w:val=\"center\"/>" : ""), normal: numbered == nil && !centered)
             case "pre":
                 let text = flatten(node)
                 return text.split(separator: "\n", omittingEmptySubsequences: false).map { paragraph(run(String($0), properties: "<w:rFonts w:ascii=\"Menlo\" w:hAnsi=\"Menlo\" w:eastAsia=\"\(xml(options.chinese))\"/><w:sz w:val=\"20\"/>"), properties: "<w:shd w:val=\"clear\" w:fill=\"F3F3F3\"/>") }.joined()

@@ -7,7 +7,7 @@ public final class ApplicationSettings {
     public static let editingLineHeight = 1.4
     private let defaults: UserDefaults
     public static let initial: [String: Any] = [
-        "shortcutHints": true, "focusMode": true, "lineNumbers": false, "showAllFiles": false, "showWorkspaceRecents": false,
+        "shortcutHints": true, "focusMode": true, "lineNumbers": false, "showAllFiles": false, "showWorkspaceRecents": false, "recentLimit": 20,
         "language": "system", "timeZone": "local", "fontChinese": "PingFangSC-Regular", "fontEnglish": "PingFangSC-Regular",
         "appearance": "system", "editTheme": "paper", "readTheme": "paper", "outlineSide": "left", "filesSide": "left", "outlineWidth": 220.0,
         "leftWidth": 220.0, "rightWidth": 220.0, "editLineSpacing": 1.3, "readLineSpacing": 1.3, "editZoom": 1.0, "readZoom": 1.0
@@ -45,6 +45,9 @@ public final class ApplicationSettings {
         case "fontChinese", "fontEnglish":
             guard let name = value as? String else { return false }
             return !name.isEmpty && name.utf16.count <= 128 && name.rangeOfCharacter(from: .controlCharacters) == nil
+        case "recentLimit":
+            guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return false }
+            return number.doubleValue.isFinite && number.doubleValue.rounded() == number.doubleValue && (0...1000).contains(number.intValue)
         case "outlineWidth", "leftWidth", "rightWidth", "editZoom", "readZoom", "editLineSpacing", "readLineSpacing":
             guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return false }
             let range: ClosedRange<Double> = ["outlineWidth", "leftWidth", "rightWidth"].contains(key) ? 180...360 : key.hasSuffix("LineSpacing") ? 0.75...2.5 : 0.5...2

@@ -55,6 +55,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     private lazy var preferencesController = PreferencesController(settings: settings, storage: imageStorage)
     private lazy var outputController = DocumentOutputController(settings: settings)
     private let notifications = ExportNotifications()
+    private var pendingExportLocationNotice = false
+    private var pendingExportReveal: URL?
     private var preferences: [String: Any] { settings.values }
     private var readingEnabled = false
     private let windowPaper = WindowPaper()
@@ -67,6 +69,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
 
     init(resources: EditorResources) { self.resources = resources }
 
+    func prepareNotifications() {
+        notifications.unavailable = { [weak self] in
+            guard let self else { return }
+            if self.ready { self.notice(self.settings.text("导出文件已移动或不可用。", "The exported file has moved or is unavailable.")) }
+            else { self.pendingExportLocationNotice = true }
+        }
+        notifications.reveal = { [weak self] url in
+            guard let self else { return }
+            if self.initialLoadFinished { self.revealExport(url) } else { self.pendingExportReveal = url }
+        }
+        notifications.activate()
+    }
+    private func revealExport(_ url: URL) {
+        guard (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else {
+            notice(settings.text("导出文件已移动或不可用。", "The exported file has moved or is unavailable.")); return
+        }
+        FinderReveal.show(url)
+    }
     func applicationDidFinishLaunching(_ notification: Notification) {
         Task { @MainActor in do { try await start() } catch { fail("startupFailure", error) } }
     }
@@ -284,6 +304,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         preferencesController.refresh()
     }
     private func preferencesChanged() {
+        recent.enforceLimit()
         emit(["kind": "preferences", "preferences": preferences]); configureMenu(); updateWindowTitle(); updateBackground()
     }
     @objc private func magnifyContent(_ gesture: NSMagnificationGestureRecognizer) {
@@ -352,6 +373,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         let late = pendingURLs; pendingURLs.removeAll()
         for url in late { await openLocation(url) }
         _ = try await deliver(["kind": "initialReady"])
+        if pendingExportLocationNotice { pendingExportLocationNotice = false; notice(settings.text("导出文件已移动或不可用。", "The exported file has moved or is unavailable.")) }
+        if let url = pendingExportReveal { pendingExportReveal = nil; revealExport(url) }
     }
 
     private func register(_ loaded: FileDocumentLoad, preview: Bool = false, openRequestID: String = "", fragment: String? = nil) async throws {
@@ -382,6 +405,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         do { try await register(store.open(url)) } catch { record("documentOpenFailure", error); notice(settings.text("无法打开文档：", "Cannot open document: ") + l(String(describing: error))) }
     }
     private func updateRecentMenu() {
+        recent.enforceLimit()
         sendRecentLocations()
         guard let menu = recentMenu else { return }; menu.removeAllItems()
         for url in recent.visibleURLs(includeWorkspaceFiles: preferences["showWorkspaceRecents"] as? Bool == true) {
@@ -717,6 +741,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
             case "new": Task { @MainActor in await createDocument() }
             case "open": Task { @MainActor in await chooseOpen() }
             case "openRecent": if let url = recentIDs[command["entryID"] as! String] { Task { @MainActor in await openLocation(url) } }
+            case "home": latestWorkspaceRequest = nil; activeDocumentID = nil; updateWindowTitle()
+            case "removeRecent":
+                let ids = command["entryIDs"] as! [String]
+                guard ids.allSatisfy({ recentIDs[$0] != nil }) else { throw BridgeFailure.unauthorized }
+                recent.remove(ids.compactMap { recentIDs[$0] }); updateRecentMenu()
+            case "clearRecent": recent.clear(); updateRecentMenu()
             case "rememberPosition":
                 pendingPositions[command["documentID"] as! String] = ReadingPosition(mode: command["mode"] as! String, line: command["line"] as! Int, fraction: command["fraction"] as! Double)
             case "exportDocument": Task { @MainActor in await exportDocument(command) }
@@ -809,7 +839,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
             }, image: { reference in
                 return try await self.readImage(reference, documentID: id)
             })
-            if case .exported(let url) = result { notice(settings.text("导出成功：", "Export complete: ") + url.lastPathComponent, autoDismiss: true); await notifications.send(success: true, name: url.lastPathComponent, english: settings.english) }
+            if case .exported(let url) = result { notice(settings.text("导出成功：", "Export complete: ") + url.lastPathComponent, autoDismiss: true); await notifications.send(success: true, name: url.lastPathComponent, english: settings.english, fileURL: url) }
         } catch {
             record("documentOutputFailure", error)
             notice(settings.text("导出／打印未完成：请检查排版参数、字体、图片或输出位置。", "Export / Print did not finish. Check layout options, fonts, images or the output location.") + " " + String(describing: error))
