@@ -89,7 +89,7 @@ python3 Scripts/release.py Dist/<最终构建目录>/<本次构建> --notes <本
 - 新表格或旧表外延输入刚被语法树识别时，以同一EditorState中的短暂源范围保持原生插入节点，在该文本上用行／字符装饰呈现网格；空行结束或选区离开后解除。单元格写回使用独立事务标注，不误判为重新构造。Tab和命中映射使用权威源区间；显式右键请求可交接给既有表格控件。不要在分隔行只输入了一部分时替换整块DOM，也不通过重写正文补偿已丢失的DOM光标。
 - 普通正文专注按显式源换行划分，自动折行仍同属一段；列表项及代码／表格保留结构范围。空标题与前缀编辑位置不能使用零字号隐藏插入点；原生caret规则须覆盖CodeMirror默认主题，并共用于单元格。滚动条样式按空闲隐藏、滚动时显示设计，并保留固定滚动留白；用户反馈实际界面仍会常驻，问题未解决。
 - 长标签文字通过独立裁切窗口移动，关闭／未保存控件不移动。仅对溢出的活动／悬停标签运行动画；标签未变化时保持DOM身份，避免每个字符重启滚动。后台及系统减少动态效果均有静态处理，不新增持续JavaScript帧循环。
-- 原生 `initialize` 附带 `preferences`：`shortcutHints/focusMode/lineNumbers` 布尔值，`language(system/zh-Hans/en)` 与解析后的 `locale`，`timeZone(local/UTC)`、两个字体 PostScript 名、`editTheme/readTheme(paper/kraft/eye)`、`appearance(system/light/dark)`、`leftWidth/rightWidth(180…360)`、`editLineSpacing/readLineSpacing(0.75…2.5)`、`editZoom/readZoom(0.5…2)`。旧 `outlineWidth` 仅作宽度迁移兼容。行距为旧包各模式实际行高的相对倍数，默认1.3：排版编辑基准1.4，源码／阅读1.85；代码与表格分别沿用自身旧基准。根编辑器规则必须以足够CSS优先级覆盖CodeMirror，否则普通编辑仍会固定1.4。导出使用当前模式乘算后的实际值，不能把1.3直接当CSS行高。原生 UserDefaults 按系统用户持久化，Web 全字段校验并更新显示，不改文档历史。阅读模式为当前窗口的临时状态，不持久化。
+- 原生 `initialize` 附带 `preferences`：`shortcutHints/focusMode/lineNumbers` 布尔值，`language(system/zh-Hans/en)` 与解析后的 `locale`，`timeZone(local/UTC)`、两个字体 PostScript 名、`editTheme/readTheme(paper/kraft/eye)`、`appearance(system/light/dark)`、`leftWidth/rightWidth(180…360)`、`editLineSpacing/readLineSpacing(0.75…2.5)`、`editZoom/readZoom(0.5…2)`。旧 `outlineWidth` 仅作宽度迁移兼容。行距为旧包各模式实际行高的相对倍数，默认1.3：排版编辑基准1.4，源码／阅读1.85；代码与表格分别沿用自身旧基准。根编辑器规则必须以足够CSS优先级覆盖CodeMirror，否则普通编辑仍会固定1.4。导出面板显示阅读紧凑基准的相对倍率，输出时乘1.85，不能把1.3直接当CSS行高；打印继续使用当前模式。原生 UserDefaults 按系统用户持久化，Web 全字段校验并更新显示，不改文档历史。阅读模式为当前窗口的临时状态，不持久化。
 - Web `setPreference(key,value)` 仅接受固定白名单及严格布尔／数值／枚举类型；目录拖动结束、缩放去抖提交；原生只持久化 Web 已验证的变更，不回传整套旧偏好覆盖进行中的手势。原生设置／恢复默认仍发送 `preferences`，Web 只更新有差异的编辑选项和字体规则。恢复默认只移除偏好白名单，不清整个 UserDefaults domain；最近记录上限恢复为20时按新上限裁减。
 - `readingMode(enabled)` 仅控制应用内窗口样式，不修改 NSApp presentation options、Dock、系统菜单或窗口大小。菜单新增 `toggleSource`，排版／源码通过 StateEffect 和 Compartment 在同一 EditorView 上重配置，不能重建正文／选区／撤销历史。
 - 链接打开或激活另一文档时，在同一编辑状态切换后先完成章节的即时定位，再以约200ms淡入及14px横移呈现；同文档继续使用原滚动动画。动画只改变正文容器及标题的呈现，不克隆文档DOM、不重建历史、不推迟原生文档登记。新切页／输入／滚轮及减少动态效果设置变化取消旧动画；后台测量暂停时有定时恢复可见性的保护。
@@ -109,7 +109,7 @@ python3 Scripts/release.py Dist/<最终构建目录>/<本次构建> --notes <本
 - 标签关闭使用带 revision 的 `closeDocument/closeReceipt`。全部关闭使用原生请求、Web 逐文档决策、最终短冻结与 `closeAllResult/closeAllReceipt`；保存/图片/新输入均不得绕过确认。
 - 新命令必须同时更新原生 schema、Web 发送/接收、失效/重放处理及接口说明，不能允许文档传任意路径或扩展成系统命令通道。
 - 导航消息 `rememberPosition(documentID,mode,line,fraction)` 只存行／块比例，路径由原生登记文档提供，批准关闭后持久化；装载 `resume` 供5秒显式跳转。最近记录由原生发送 `recentLocations` 带不透明条目ID，`openRecent(entryID)`、`removeRecent(entryIDs)` 不接受路径；`clearRecent` 清除两类来源，`home` 清空活动标题但不关闭文档或文件夹；清除位置记录发送 `clearPositions`。
-- `exportDocument(documentID,printing,mode)` 只由菜单／用户动作触发，`mode`仅接受edit／source／read以选择当前呈现对应的全局行距基准，不能接收任意排版值或路径。原生系统面板决定输出URL。原生调用 `exportSnapshot(id)` 获取 `{html,resources}`，图片仍经同文档 ImageStore 授权读取并经ImageIO尺寸预检和后台有界转换；独立非持久静态WebView通过DOM属性替换内嵌资源，不能正则扫描／全局替换文档文字。等待字体／图片／图表完成后输出。
+- `exportDocument(documentID,printing,mode)` 只由菜单／用户动作触发，`mode`仅接受edit／source／read供打印选择当前呈现的行距基准，不能接收任意排版值或路径；PDF／Word导出始终以阅读行距为默认，独立读取各自记忆的配置。原生系统面板决定输出URL。原生调用 `exportSnapshot(id)` 获取 `{html,resources}`，图片仍经同文档 ImageStore 授权读取并经ImageIO尺寸预检和后台有界转换；独立非持久静态WebView通过DOM属性替换内嵌资源，不能正则扫描／全局替换文档文字。等待字体／图片／图表完成后输出。
 - DOCX以语义树生成OOXML和去重内嵌图片，只跨进程回传短图片ID及各图片的一份编码；编号先写全部abstractNum再写num。PDF不生成Word对象树，按可见文字行、图片／图表及表格行计算有限分页边界，再由WebKit逐区域生成保留文本的PDF、CoreGraphics合成带页边距的A4，并以PDFKit按标题和分页坐标生成书签；不用整页截图替代正文。系统打印使用生成的PDF经PDFKit呼出面板，不直接循环WebKit的NSPrintOperation。
 - 输出安全上限：512图片引用、64MiB输入图片、96MiB转换PNG／32M累计像素、源图预检100M像素、输出栅格最长边2400px；PDF最多1000页、捕获128MiB、最终200MiB。不以截断内容冒充成功；超限或资源失败保护当前编辑及已有输出，输出原子写入。
 - `filesSide(left/right)` 与 `outlineSide` 独立。原生窗口自创建起使用固定的标准AppKit标题栏，不启用 `fullSizeContentView`，不在阅读切换中修改styleMask／窗口外框。Web内容始终位于原生标题栏下方，不再模拟32px标题栏或发送 `zoomWindow`；拖窗及双击系统偏好由AppKit处理。正文列宽直接按实际滚动视口用CSS约束，保留稳定滚动条留白，避免长短文档的滚动条切换改变宽度；根内容列的flex-basis固定为auto，避免CodeMirror保留的窄视口测量在滚动重绘后覆盖应用列宽。不缓存JS视口宽度、不增加布局containment。两侧导航可临时收窄但不自动重写已存宽度。
@@ -125,6 +125,7 @@ python3 Scripts/release.py Dist/<最终构建目录>/<本次构建> --notes <本
 - `WorkspaceEntry.modified` 是无跟随 stat 得到的毫秒时间。进入文件导航可请求 `workspaceMetadata(entryIDs,generation,requestID)`，每批最多4096个已登记UUID；回执同代次／请求加 `dates`，只刷新现有DOM时间，不重建点击目标、不读文件正文、不递归遍历。左右栏各有贯穿可用高度的键盘／指针分隔条，同侧目录与文件树共享宽度。
 - `diagnostic(event)` 只接受固定事件枚举，不允许正文、URL、路径、堆栈或任意消息字段。Web同类事件5秒节流；原生捕获到的Error只提取类型、白名单错误域和码，绝不序列化NSError.userInfo／localizedDescription；POSIX失败保留真正errno而非Swift枚举序号。`RuntimeDataStore.record` 与清理共用管理锁，每次通过 `openat(O_NOFOLLOW)` 重新打开固定文件，拒绝符号链接／硬链接和特殊文件，五份约2MiB轮转。不能因日志写入失败递归产生日志。
 - 导出控制器返回明确 `cancelled/exported/printed`，只有系统保存面板确认后才申请本地通知权限；成功原子写入后发送一次通知，失败保留编辑并通知，取消不发送失败通知。前台通知通过本地UNUserNotificationCenter委托申请横幅／列表呈现，OS权限或勿扰可能抑制；没有远程推送注册或请求。
+- PDF／Word的导出排版与最近成功格式仅在原生 UserDefaults 保存，与传给Web的全局偏好分离。各格式未自定义时实时取阅读行距及中英文字体；面板中的每格式草稿可切换和恢复跟随，仅输出文件成功写入后才提交；取消、校验错误及写入失败不更改记忆。已记忆的数值为阅读紧凑行距倍率，输出转换为字号倍率，保持既有0.5–5范围；DOCX正文使用按12磅计算的最小twips行高而非字体相关的自动行距，较高字形和行内图片可撑开行框，避免固定行高裁切。恢复默认与缓存清理的配置白名单包含导出配置，旧版忽略这些新键。
 
 ## 4. 文件、图片与安全约束
 

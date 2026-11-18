@@ -22,6 +22,66 @@ public struct ExportOptions: Sendable {
     public init(chinese: String, english: String) { self.chinese = chinese; self.english = english }
     public var valid: Bool { indent.isFinite && (0...10).contains(indent) && lineSpacing.isFinite && (0.5...5).contains(lineSpacing) }
 }
+
+public enum ExportFormat: String, CaseIterable, Sendable {
+    case pdf, docx
+}
+
+/// The spacing shown to the user is relative to the reading mode's compact
+/// baseline, just like the reading-spacing preference. Output uses an absolute
+/// multiple of the font size instead.
+public struct ExportLayout: Equatable, Sendable {
+    public var indentEnabled: Bool
+    public var indent: Double
+    public var spacing: Double
+    public var chinese: String
+    public var english: String
+
+    public init(indentEnabled: Bool = true, indent: Double = 2, spacing: Double, chinese: String, english: String) {
+        self.indentEnabled = indentEnabled; self.indent = indent; self.spacing = spacing
+        self.chinese = chinese; self.english = english
+    }
+    public var valid: Bool {
+        indent.isFinite && (0...10).contains(indent) && spacing.isFinite &&
+        (0.5 / ApplicationSettings.bodyLineHeight...5 / ApplicationSettings.bodyLineHeight).contains(spacing) &&
+        ApplicationSettings.accepts("fontChinese", chinese) && ApplicationSettings.accepts("fontEnglish", english)
+    }
+    public var options: ExportOptions {
+        var result = ExportOptions(chinese: chinese, english: english)
+        result.indent = indentEnabled ? indent : 0
+        // Guard against floating-point rounding at the original output boundaries.
+        result.lineSpacing = max(0.5, min(5, spacing * ApplicationSettings.bodyLineHeight))
+        return result
+    }
+}
+
+/// A panel draft keeps unvalidated text while switching formats. Installed
+/// font lookup remains in AppKit; this type only accepts the resolved names.
+public struct ExportLayoutDraft: Sendable {
+    public let baseline: ExportLayout
+    public let followingPreferences: Bool
+    public var indentEnabled: Bool
+    public var indent: String
+    public var spacing: String
+    public var chinese: String
+    public var english: String
+
+    public init(_ layout: ExportLayout, followingPreferences: Bool) {
+        baseline = layout; self.followingPreferences = followingPreferences
+        indentEnabled = layout.indentEnabled; indent = String(layout.indent); spacing = String(layout.spacing)
+        chinese = layout.chinese; english = layout.english
+    }
+    public func resolved(chinese: String, english: String) -> ExportLayout? {
+        func number(_ value: String) -> Double? { Double(value.replacingOccurrences(of: ",", with: ".")) }
+        guard let spacing = number(spacing) else { return nil }
+        let parsedIndent = number(indent)
+        let usableIndent = parsedIndent.flatMap { $0.isFinite && (0...10).contains($0) ? $0 : nil }
+        guard !indentEnabled || usableIndent != nil else { return nil }
+        let result = ExportLayout(indentEnabled: indentEnabled, indent: usableIndent ?? baseline.indent,
+                                  spacing: spacing, chinese: chinese, english: english)
+        return result.valid ? result : nil
+    }
+}
 public struct ExportImage: Sendable {
     public let data: Data
     public let width: Double
@@ -79,8 +139,11 @@ public enum WordDocument {
             let body = nodes.map { block($0) }.joined()
             _ = relation("styles", "styles.xml"); _ = relation("numbering", "numbering.xml")
             add("word/document.xml", "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:pic=\"http://schemas.openxmlformats.org/drawingml/2006/picture\"><w:body>\(body)<w:sectPr><w:pgSz w:w=\"11906\" w:h=\"16838\"/><w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/></w:sectPr></w:body></w:document>")
-            let headings = (1...6).map { level in "<w:style w:type=\"paragraph\" w:styleId=\"Heading\(level)\"><w:name w:val=\"heading \(level)\"/><w:basedOn w:val=\"Normal\"/><w:next w:val=\"Normal\"/><w:qFormat/><w:pPr><w:keepNext/><w:spacing w:before=\"240\" w:after=\"120\"/><w:outlineLvl w:val=\"\(level - 1)\"/></w:pPr><w:rPr><w:b/><w:sz w:val=\"\([40,32,28,26,24,24][level - 1])\"/></w:rPr></w:style>" }.joined()
-            add("word/styles.xml", "<w:styles xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:docDefaults><w:rPrDefault><w:rPr>\(fonts)<w:sz w:val=\"24\"/><w:lang w:val=\"en-US\" w:eastAsia=\"zh-CN\"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after=\"120\" w:line=\"\(Int((options.lineSpacing * 240).rounded()))\" w:lineRule=\"auto\"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\"><w:name w:val=\"Normal\"/></w:style>\(headings)</w:styles>")
+            let headings = (1...6).map { level in "<w:style w:type=\"paragraph\" w:styleId=\"Heading\(level)\"><w:name w:val=\"heading \(level)\"/><w:basedOn w:val=\"Normal\"/><w:next w:val=\"Normal\"/><w:qFormat/><w:pPr><w:keepNext/><w:spacing w:before=\"240\" w:after=\"120\" w:line=\"312\" w:lineRule=\"auto\"/><w:outlineLvl w:val=\"\(level - 1)\"/></w:pPr><w:rPr><w:b/><w:sz w:val=\"\([40,32,28,26,24,24][level - 1])\"/></w:rPr></w:style>" }.joined()
+            // Word's "auto" line unit is font-dependent, not the font size.
+            // Minimum twips align ordinary 12 pt text without clipping taller
+            // glyphs or inline images that need a larger line box.
+            add("word/styles.xml", "<w:styles xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:docDefaults><w:rPrDefault><w:rPr>\(fonts)<w:sz w:val=\"24\"/><w:lang w:val=\"en-US\" w:eastAsia=\"zh-CN\"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after=\"120\" w:line=\"\(Int((options.lineSpacing * 240).rounded()))\" w:lineRule=\"atLeast\"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\"><w:name w:val=\"Normal\"/></w:style>\(headings)</w:styles>")
             add("word/numbering.xml", "<w:numbering xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\(abstractNumbering.joined())\(numbering.joined())</w:numbering>")
             add("word/_rels/document.xml.rels", "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\(relationships.joined())</Relationships>")
             add("_rels/.rels", "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/></Relationships>")

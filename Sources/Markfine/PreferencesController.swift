@@ -167,7 +167,7 @@ final class PreferencesController: NSObject, NSComboBoxDataSource, NSComboBoxDel
     @objc private func restoreDefaults() {
         guard let panel else { return }
         let alert = NSAlert(); alert.messageText = settings.text("恢复默认偏好设置？", "Restore default preferences?")
-        alert.informativeText = settings.text("恢复默认偏好；最近记录上限恢复为20条，超额的旧记录会移除。文档、附件和S3凭据保留。", "Restore default preferences. The recent limit returns to 20, removing older excess records. Documents, attachments and S3 credentials are kept.")
+        alert.informativeText = settings.text("恢复默认偏好，并清除记住的 PDF／Word 导出配置。最近记录上限恢复为20条，超额的旧记录会移除。文档、附件和S3凭据保留。", "Restore default preferences and clear saved PDF / Word export layouts. The recent limit returns to 20, removing older excess records. Documents, attachments and S3 credentials are kept.")
         alert.addButton(withTitle: settings.text("恢复默认", "Restore Defaults")); alert.addButton(withTitle: settings.text("取消", "Cancel"))
         alert.beginSheetModal(for: panel) { [weak self] response in
             guard response == .alertFirstButtonReturn, let self else { return }; self.settings.reset(); self.storage.useLocal(); self.onStorageChange?(); self.onChange?(); self.rebuild()

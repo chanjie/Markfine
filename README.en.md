@@ -51,6 +51,8 @@ Open a diagram in a larger view, zoom it independently and drag to explore witho
 
 PDF exports include expandable, navigable heading bookmarks; Word exports retain heading levels for navigation. The bundled Finder extension can show formatted Markdown when you press Space. Mermaid appears as source, and local images depend on system access.
 
+Exports default to the reading line spacing and Chinese / English fonts from Preferences. PDF and Word remember adjusted layouts separately after a successful export, and can be restored to follow Preferences.
+
 Return Home without closing open documents or the folder. Remove recent locations individually or in batches, and choose how many to retain.
 
 ### Separate appearance settings for writing and reading

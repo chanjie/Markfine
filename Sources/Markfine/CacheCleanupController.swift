@@ -34,7 +34,7 @@ enum CacheCleanupController {
             }
             if preferences.state == .on || recents.state == .on || navigation.state == .on {
                 let confirmation = NSAlert(); confirmation.messageText = settings.text("清除所选配置或历史记录？", "Remove selected settings or history?")
-                confirmation.informativeText = settings.text("此操作不能撤销。恢复配置会将最近记录上限设为20，并移除超额旧记录；不会清理文档与附件。", "This cannot be undone. Restoring preferences resets the recent limit to 20 and removes older excess records. Documents and attachments are untouched.")
+                confirmation.informativeText = settings.text("此操作不能撤销。恢复配置会清除记住的 PDF／Word 导出配置，将最近记录上限设为20并移除超额旧记录；不会清理文档与附件。", "This cannot be undone. Restoring preferences clears saved PDF / Word export layouts, resets the recent limit to 20 and removes older excess records. Documents and attachments are untouched.")
                 confirmation.addButton(withTitle: settings.text("确认清除", "Clear")); confirmation.addButton(withTitle: settings.text("取消", "Cancel"))
                 confirmation.beginSheetModal(for: window) { if $0 == .alertFirstButtonReturn { perform() } }
             } else { perform() }

@@ -15,29 +15,35 @@ final class DocumentOutputController: NSObject {
     private let spacing = NSTextField(string: "1.5")
     private let indentEnabled = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let chinese = NSComboBox(), english = NSComboBox()
+    private var fonts: [(title: String, value: String)] = []
+    private var drafts: [ExportFormat: ExportLayoutDraft] = [:]
+    private var activeFormat: ExportFormat = .pdf
     init(settings: ApplicationSettings) { self.settings = settings }
     @discardableResult func perform(window: NSWindow, documentURL: URL?, title: String, printing: Bool, lineHeight: Double? = nil,
                  confirmed: () async -> Void = {}, snapshot: () async throws -> [String: Any], image: (String) async throws -> LocalImage) async throws -> Result {
-        guard !busy, window.attachedSheet == nil else { return .cancelled }; busy = true; defer { busy = false; savePanel = nil }
+        guard !busy, window.attachedSheet == nil else { return .cancelled }; busy = true; defer { busy = false; savePanel = nil; drafts.removeAll() }
         var options = ExportOptions(chinese: settings.values["fontChinese"] as? String ?? "PingFangSC-Regular", english: settings.values["fontEnglish"] as? String ?? "PingFangSC-Regular")
         options.lineSpacing = lineHeight ?? settings.lineHeight(reading: false)
         var target: URL?
+        var selectedLayout: ExportLayout?
+        var selectedDraft: ExportLayoutDraft?
         if !printing {
+            drafts.removeAll(); activeFormat = settings.lastExportFormat
             let panel = NSSavePanel(); savePanel = panel
             panel.title = settings.text("导出文档", "Export Document"); panel.prompt = settings.text("导出", "Export")
-            panel.canCreateDirectories = true; panel.isExtensionHidden = false; panel.allowedContentTypes = [.pdf]
-            panel.nameFieldStringValue = (title as NSString).deletingPathExtension + ".pdf"; panel.directoryURL = documentURL?.deletingLastPathComponent()
-            panel.accessoryView = controls(options)
+            panel.canCreateDirectories = true; panel.isExtensionHidden = false
+            panel.allowedContentTypes = [UTType(filenameExtension: activeFormat.rawValue) ?? .data]
+            panel.nameFieldStringValue = (title as NSString).deletingPathExtension + "." + activeFormat.rawValue; panel.directoryURL = documentURL?.deletingLastPathComponent()
+            panel.accessoryView = controls()
             let response: NSApplication.ModalResponse = await withCheckedContinuation { continuation in panel.beginSheetModal(for: window) { continuation.resume(returning: $0) } }
             guard response == .OK, let url = panel.url else { return .cancelled }; target = url
             await confirmed()
-            options.indent = indentEnabled.state == .on ? Double(indent.stringValue) ?? .nan : 0
-            options.lineSpacing = Double(spacing.stringValue) ?? .nan
-            guard options.valid else { throw DocumentExportFailure.invalidOptions }
-            guard let cn = NSFont(name: chinese.stringValue, size: 12), let en = NSFont(name: english.stringValue, size: 12) else { throw DocumentExportFailure.invalidOptions }
-            options.chinese = cn.fontName; options.english = en.fontName
+            let draft = captureDraft()
+            guard let cn = NSFont(name: draft.chinese, size: 12), let en = NSFont(name: draft.english, size: 12),
+                  let layout = draft.resolved(chinese: cn.fontName, english: en.fontName) else { throw DocumentExportFailure.invalidOptions }
+            options = layout.options; selectedLayout = layout; selectedDraft = draft
             // Never allow an export to overwrite the source Markdown, even through a manually typed name.
-            guard ["pdf", "docx"].contains(url.pathExtension.lowercased()), url.standardizedFileURL.resolvingSymlinksInPath() != documentURL?.standardizedFileURL.resolvingSymlinksInPath() else { throw CocoaError(.fileWriteInvalidFileName) }
+            guard url.pathExtension.lowercased() == activeFormat.rawValue, url.standardizedFileURL.resolvingSymlinksInPath() != documentURL?.standardizedFileURL.resolvingSymlinksInPath() else { throw CocoaError(.fileWriteInvalidFileName) }
         }
         let renderer = DocumentPrintRenderer()
         let result = try await renderer.prepare(snapshot: snapshot(), options: options, word: target?.pathExtension.lowercased() == "docx", image: image)
@@ -52,29 +58,71 @@ final class DocumentOutputController: NSObject {
             try data.write(to: target, options: .atomic)
         } else if let target { try await renderer.writePDF(to: target) }
         else { try await renderer.printDocument(window: window) }
+        if let selectedLayout, let selectedDraft {
+            settings.recordSuccessfulExport(activeFormat, layout: selectedLayout, followingPreferences: selectedDraft.followingPreferences, baseline: selectedDraft.baseline)
+        }
         return target.map(Result.exported) ?? .printed
     }
-    private func controls(_ options: ExportOptions) -> NSView {
+    private func draft(for format: ExportFormat) -> ExportLayoutDraft {
+        if let draft = drafts[format] { return draft }
+        let saved = settings.exportLayout(for: format)
+        let draft = ExportLayoutDraft(saved ?? settings.defaultExportLayout, followingPreferences: saved == nil)
+        drafts[format] = draft; return draft
+    }
+    private func captureDraft() -> ExportLayoutDraft {
+        var draft = draft(for: activeFormat)
+        draft.indentEnabled = indentEnabled.state == .on; draft.indent = indent.stringValue
+        func fontValue(_ text: String) -> String {
+            fonts.first { $0.title.caseInsensitiveCompare(text) == .orderedSame || $0.value.caseInsensitiveCompare(text) == .orderedSame }?.value ?? text
+        }
+        draft.spacing = spacing.stringValue; draft.chinese = fontValue(chinese.stringValue); draft.english = fontValue(english.stringValue)
+        drafts[activeFormat] = draft; return draft
+    }
+    private func showDraft(_ draft: ExportLayoutDraft) {
+        indentEnabled.state = draft.indentEnabled ? .on : .off; indent.isEnabled = draft.indentEnabled
+        indent.stringValue = draft.indent; spacing.stringValue = draft.spacing
+        func fontTitle(_ value: String) -> String { fonts.first { $0.value == value }?.title ?? value }
+        chinese.stringValue = fontTitle(draft.chinese); english.stringValue = fontTitle(draft.english)
+    }
+    private func controls() -> NSView {
         let stack = NSStackView(); stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 10
         stack.edgeInsets = NSEdgeInsets(top: 12, left: 16, bottom: 12, right: 16)
         stack.widthAnchor.constraint(equalToConstant: 510).isActive = true
         func row(_ label: String, _ controls: [NSView]) { let row = NSStackView(); row.orientation = .horizontal; row.spacing = 10; let title = NSTextField(labelWithString: label); title.widthAnchor.constraint(equalToConstant: 125).isActive = true; row.addArrangedSubview(title); for view in controls { row.addArrangedSubview(view) }; stack.addArrangedSubview(row) }
         format.removeAllItems(); format.addItems(withTitles: ["PDF", "Word (.docx)"]); format.target = self; format.action = #selector(changeFormat)
+        format.selectItem(at: activeFormat == .pdf ? 0 : 1)
         row(settings.text("格式", "Format"), [format])
-        indentEnabled.title = settings.text("首行缩进", "Indent first line"); indentEnabled.state = .on; indent.stringValue = "2"; indent.widthAnchor.constraint(equalToConstant: 55).isActive = true
+        indentEnabled.title = settings.text("首行缩进", "Indent first line"); indentEnabled.target = self; indentEnabled.action = #selector(changeIndent); indent.widthAnchor.constraint(equalToConstant: 55).isActive = true
         row(settings.text("普通段落", "Body paragraphs"), [indentEnabled, indent, NSTextField(labelWithString: settings.text("字符（0–10）", "characters (0–10)"))])
-        spacing.stringValue = String(format: "%g", options.lineSpacing); spacing.widthAnchor.constraint(equalToConstant: 55).isActive = true
-        row(settings.text("行间距", "Line spacing"), [spacing, NSTextField(labelWithString: settings.text("倍字号（0.5–5）", "× font size (0.5–5)"))])
-        let fonts = NSFontManager.shared.availableFontFamilies.sorted()
-        for (label, combo, value) in [(settings.text("中文字体", "Chinese font"), chinese, options.chinese), (settings.text("英文字体", "English font"), english, options.english)] {
-            combo.removeAllItems(); combo.addItems(withObjectValues: fonts); combo.stringValue = value; combo.completes = true; combo.numberOfVisibleItems = 10; combo.widthAnchor.constraint(equalToConstant: 285).isActive = true; row(label, [combo])
+        spacing.widthAnchor.constraint(equalToConstant: 75).isActive = true
+        row(settings.text("行间距", "Line spacing"), [spacing, NSTextField(labelWithString: settings.text("倍阅读紧凑行距（约 0.2703–2.7027）", "× compact reading (approx. 0.2703–2.7027)"))])
+        let families = NSFontManager.shared.availableFontFamilies.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        fonts = [(settings.text("苹方（默认）", "PingFang (default)"), "PingFangSC-Regular")] + families.filter { $0 != "PingFang SC" }.compactMap { family in
+            NSFont(name: family, size: 17).map { (family, $0.fontName) }
         }
-        let note = NSTextField(wrappingLabelWithString: settings.text("A4 纵向 · 白底 · 正文 12 磅。标题、列表、代码与表格不套用首行缩进。", "A4 portrait · White · 12 pt body. Headings, lists, code and tables are not first-line indented.")); note.font = .systemFont(ofSize: 11); note.textColor = .secondaryLabelColor; stack.addArrangedSubview(note)
+        for (label, combo) in [(settings.text("中文字体", "Chinese font"), chinese), (settings.text("英文字体", "English font"), english)] {
+            combo.removeAllItems(); combo.addItems(withObjectValues: fonts.map(\.title)); combo.completes = true; combo.numberOfVisibleItems = 10; combo.widthAnchor.constraint(equalToConstant: 285).isActive = true; row(label, [combo])
+        }
+        let restore = NSButton(title: settings.text("恢复跟随首选项", "Follow Preferences"), target: self, action: #selector(restorePreferences))
+        row("", [restore])
+        let note = NSTextField(wrappingLabelWithString: settings.text(
+            "默认使用首选项的阅读行间距和中英文字体。PDF 与 Word 分别记忆排版；恢复跟随首选项在成功导出后生效。\nA4 纵向 · 白底 · 正文 12 磅。标题、列表、代码与表格不套用首行缩进。",
+            "Defaults use the reading spacing and Chinese / English fonts from Preferences. PDF and Word remember layouts separately; Follow Preferences takes effect after a successful export.\nA4 portrait · White · 12 pt body. Headings, lists, code and tables are not first-line indented."))
+        note.font = .systemFont(ofSize: 11); note.textColor = .secondaryLabelColor; note.preferredMaxLayoutWidth = 478; stack.addArrangedSubview(note)
+        showDraft(draft(for: activeFormat))
         return stack
     }
+    @objc private func changeIndent() { indent.isEnabled = indentEnabled.state == .on }
+    @objc private func restorePreferences() {
+        let draft = ExportLayoutDraft(settings.defaultExportLayout, followingPreferences: true)
+        drafts[activeFormat] = draft; showDraft(draft)
+    }
     @objc private func changeFormat() {
-        guard let panel = savePanel else { return }; let ext = format.indexOfSelectedItem == 0 ? "pdf" : "docx"
-        panel.allowedContentTypes = [UTType(filenameExtension: ext) ?? .data]; panel.nameFieldStringValue = (panel.nameFieldStringValue as NSString).deletingPathExtension + "." + ext
+        guard let panel = savePanel else { return }
+        _ = captureDraft(); activeFormat = format.indexOfSelectedItem == 0 ? .pdf : .docx
+        showDraft(draft(for: activeFormat))
+        panel.allowedContentTypes = [UTType(filenameExtension: activeFormat.rawValue) ?? .data]
+        panel.nameFieldStringValue = (panel.nameFieldStringValue as NSString).deletingPathExtension + "." + activeFormat.rawValue
     }
 }
 
