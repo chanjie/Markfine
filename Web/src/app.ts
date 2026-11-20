@@ -30,7 +30,7 @@ import { tabLabel, closeTargets, showTabMenu, installReadingTabs, installTabLabe
 import { SearchHighlights } from './search-highlights';
 import { CopyHighlight } from './copy-highlight';
 import { exportHTML } from './document-output';
-import { fileIcon } from './file-icons';
+import { fileIcon, fileKind } from './file-icons';
 import { decodeFragment, headingTargets } from './heading-navigation';
 import { DocumentTransition } from './document-transition';
 import { sourceLinkTarget } from './inline-presentation';
@@ -44,6 +44,8 @@ import { pairedPunctuation } from './paired-punctuation';
 import { continuedStart, listNumberingTransaction, orderedListEditing, orderedMarkerAt } from './ordered-lists';
 import { preserveLineEndings, lineEndings, serializeText, textPresentation, textParagraphRange, renderText, textSnapshot, selectedRawText } from './text-document';
 import { markdownInput, markdownTab, listIndentTransaction } from './markdown-input';
+
+interface RecentItem { id: string; name: string; path: string; directory: boolean }
 
 declare global {
   var __markfineBootstrap: Context;
@@ -98,7 +100,7 @@ export class EditorApplication {
   private readingLocale = '';
   private readingPosition = 0;
   private wasEmpty = true;
-  private recentItems: { id: string; name: string; path: string }[] = [];
+  private recentItems: RecentItem[] = [];
   private managingRecents = false;
   private selectedRecents = new Set<string>();
   private collapsed = new Map<string, Set<number>>();
@@ -1028,7 +1030,7 @@ export class EditorApplication {
       for(const item of this.documents.values())this.edit(item.id,{effects:preferencesEffect.of(this.preferences)});
       this.readingDocument=undefined;if(this.reading)this.renderReading();return true;
     }
-    if (kind === 'recentLocations') { this.renderRecent((message.items ?? []) as { id: string; name: string; path: string }[]); return true; }
+    if (kind === 'recentLocations') { this.renderRecent((message.items ?? []) as RecentItem[]); return true; }
     if (kind === 'clearPositions') { for (const item of this.documents.values()) item.resume = undefined; this.dismissResume(); return true; }
     if (this.workspaceBrowser.receive(message)) { if (kind === 'workspace') { this.latestOpenRequest = ''; this.openRequests.clear(); this.cleanupStalePreviews(''); } return true; }
     if (kind === 'openFailed') { if (message.openRequestID === this.latestOpenRequest) this.finishWorkspaceOpen(String(message.openRequestID), ''); return true; }
@@ -1304,7 +1306,7 @@ export class EditorApplication {
       this.setReading(false); this.edit(item.id, { selection: EditorSelection.cursor(line.from) }); this.view?.focus(); this.centerMatch(line.from, () => {});
     }
   }
-  private renderRecent(items: { id: string; name: string; path: string }[]): void {
+  private renderRecent(items: RecentItem[]): void {
     this.recentItems = items;
     const ids = new Set(items.map(item => item.id));
     this.selectedRecents = new Set([...this.selectedRecents].filter(id => ids.has(id)));
@@ -1321,8 +1323,12 @@ export class EditorApplication {
         row.append(check);
       }
       const button = document.createElement('button'); button.className = 'recent-item'; button.title = item.path;
+      const directory = item.directory === true;
+      button.setAttribute('aria-label', `${item.name} — ${directory ? t('文件夹', 'Folder') : t('文件', 'File')}`);
+      const label = document.createElement('span'); label.className = 'recent-label';
       const name = document.createElement('span'), path = document.createElement('small'); name.textContent = item.name; path.textContent = item.path;
-      button.append(name, path); button.onclick = () => this.post('openRecent', { entryID: item.id }); row.append(button);
+      label.append(name, path); button.append(fileIcon(fileKind(item.name, directory)), label);
+      button.onclick = () => this.post('openRecent', { entryID: item.id }); row.append(button);
       const remove = document.createElement('button'); remove.className = 'recent-remove'; remove.textContent = '×'; remove.setAttribute('aria-label', `${t('移除记录', 'Remove record')} ${item.name}`);
       remove.onclick = () => this.post('removeRecent', { entryIDs: [item.id] }); row.append(remove); byID('recent-list').append(row);
     }

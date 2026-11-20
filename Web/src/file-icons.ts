@@ -1,7 +1,8 @@
 export type FileKind = 'folder' | 'markdown' | 'text' | 'code' | 'image' | 'pdf' | 'office' | 'archive' | 'media' | 'file';
 export function fileKind(name: string, directory: boolean): FileKind {
   if (directory) return 'folder';
-  const ext = name.split('.').at(-1)?.toLowerCase() ?? '';
+  const dot = name.lastIndexOf('.');
+  const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : '';
   if (['md', 'markdown'].includes(ext)) return 'markdown';
   if (['txt', 'log', 'rtf'].includes(ext)) return 'text';
   if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'heic', 'tif', 'tiff', 'svg', 'ico', 'icns'].includes(ext)) return 'image';

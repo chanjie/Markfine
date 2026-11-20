@@ -13,6 +13,7 @@ import { highlightCode } from './code-highlighting';
 import { imageOccurrences, fittedImageWidth } from './image-syntax';
 import { pendingListLine, tableConstruction, tableCellWriteback } from './markdown-input-state';
 import { sourceTablePosition, sourceTablePresentation } from './table-construction';
+import { listWrap, listWrapPrefix } from './list-wrap';
 
 export const composingEffect = StateEffect.define<boolean>();
 const viewportEffect = StateEffect.define<{ from: number; to: number }>();
@@ -167,12 +168,15 @@ export function previewBlockRanges(state: EditorState): { from: number; to: numb
   return blocks;
 }
 
+interface PreviewDecorations { normal: DecorationSet; joins: DecorationSet }
+
 function decorations(state: EditorState, documentID: string, hydrate: (element: HTMLElement) => void,
                      imageHeights: Map<string, ImageMeasurement>,
-                     imageURL: (source: string, context: ReferenceContext) => string | null): DecorationSet {
+                     imageURL: (source: string, context: ReferenceContext) => string | null): PreviewDecorations {
   const index = state.field(referenceIndex), range = state.field(viewport);
   const raw = state.field(sourceMode), numbers = state.field(editorPreferences).lineNumbers;
-  const result: ReturnType<Decoration['range']>[] = raw ? [] : inlineDecorations(state, index.tree, range.from, range.to, index.context);
+  const joins: ReturnType<Decoration['range']>[] = [];
+  const result: ReturnType<Decoration['range']>[] = raw ? [] : inlineDecorations(state, index.tree, range.from, range.to, index.context, true, false, joins);
   const position = state.selection.main.head;
   let active = index.tree.resolveInner(position, -1);
   while (active.parent && !/^(Paragraph|Task|ATXHeading[1-6]|SetextHeading[12]|Table|FencedCode|CodeBlock|HTMLBlock|CommentBlock)$/.test(active.name)) active = active.parent;
@@ -249,6 +253,10 @@ function decorations(state: EditorState, documentID: string, hydrate: (element: 
       mark(node.from, end, editing ? 'editing-syntax-marker' : 'syntax-marker');
     }
     if (name === 'QuoteMark') result.push(Decoration.replace({}).range(node.from, node.to));
+    if (name === 'Paragraph' || name === 'Task') {
+      const prefix = listWrapPrefix(state, node);
+      if (prefix) result.push(prefix);
+    }
     if (name === 'ListMark' && /^[-+*]$/.test(state.sliceDoc(node.from, node.to))) result.push(Decoration.replace({ widget: new ListMarker('•') }).range(node.from, node.to));
     if (name === 'TaskMarker') result.push(Decoration.replace({ widget: new TaskMarker(node.from, node.to, /x/i.test(state.sliceDoc(node.from, node.to))) }).range(node.from, node.to));
   } });
@@ -280,7 +288,7 @@ function decorations(state: EditorState, documentID: string, hydrate: (element: 
     if (headingStarts.has(from)) attributes['data-heading'] = headingStarts.get(from)!;
     result.push(Decoration.line({ class: [...classes].join(' ') + (numbers ? ' source-line-number' : ''), attributes }).range(from));
   }
-  return Decoration.set(result, true);
+  return { normal: Decoration.set(result, true), joins: Decoration.set(joins, true) };
 }
 
 /** A partial tree must not destroy an unchanged table's live child editors. */
@@ -464,17 +472,21 @@ export function blockPreview(documentID: string, hydrate: (element: HTMLElement)
       pendingImages.clear();
     }
   });
-  const field = StateField.define<DecorationSet>({
+  const field = StateField.define<PreviewDecorations>({
     create: state => decorations(state, documentID, hydrate, imageHeights, previewURL),
     update: (value, transaction) => {
-      if (transaction.state.field(composition)) return value.map(transaction.changes);
+      if (transaction.state.field(composition)) {
+        return transaction.docChanged ? { normal: value.normal.map(transaction.changes), joins: value.joins.map(transaction.changes) } : value;
+      }
       if (transaction.docChanged || transaction.selection || transaction.effects.some(effect => effect.is(viewportEffect) || effect.is(composingEffect) || effect.is(preferencesEffect) || effect.is(sourceModeEffect)) ||
           transaction.startState.field(referenceIndex) !== transaction.state.field(referenceIndex)) {
-        return retainUnparsedActiveTable(value, decorations(transaction.state, documentID, hydrate, imageHeights, previewURL), transaction);
+        const next = decorations(transaction.state, documentID, hydrate, imageHeights, previewURL);
+        return { normal: retainUnparsedActiveTable(value.normal, next.normal, transaction), joins: next.joins };
       }
       return value;
     },
-    provide: field => EditorView.decorations.from(field)
+    provide: field => [EditorView.decorations.from(field, value => value.normal),
+      EditorView.outerDecorations.from(field, value => value.joins)]
   });
   const visible = ViewPlugin.fromClass(class {
     private frame = 0;
@@ -507,7 +519,7 @@ export function blockPreview(documentID: string, hydrate: (element: HTMLElement)
     }
     destroy() { cancelAnimationFrame(this.frame); clearTimeout(this.timer); }
   });
-  return [composition, viewport, referenceIndex, editorPreferences, sourceMode, field, visible, imageLoader, renderedSelection, EditorView.domEventHandlers({
+  return [composition, viewport, referenceIndex, editorPreferences, sourceMode, field, listWrap(composition), visible, imageLoader, renderedSelection, EditorView.domEventHandlers({
     compositionstart: (_event, view) => { view.dispatch({ effects: composingEffect.of(true) }); return false; },
     compositionend: (_event, view) => {
       queueMicrotask(() => { if (!view.composing) view.dispatch({ effects: composingEffect.of(false) }); });

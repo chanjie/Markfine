@@ -410,7 +410,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         guard let menu = recentMenu else { return }; menu.removeAllItems()
         for url in recent.visibleURLs(includeWorkspaceFiles: preferences["showWorkspaceRecents"] as? Bool == true) {
             let item = NSMenuItem(title: url.lastPathComponent + " — " + url.deletingLastPathComponent().lastPathComponent, action: #selector(menuCommand(_:)), keyEquivalent: "")
-            item.target = self; item.representedObject = url; item.toolTip = url.path; menu.addItem(item)
+            item.target = self; item.representedObject = url; item.toolTip = url.path
+            let kind = url.hasDirectoryPath ? settings.text("文件夹", "Folder") : settings.text("文件", "File")
+            item.image = NSImage(systemSymbolName: recentSymbol(for: url), accessibilityDescription: kind)
+            menu.addItem(item)
         }
         if menu.items.isEmpty { let item = NSMenuItem(title: settings.text("暂无最近记录", "No recent locations"), action: nil, keyEquivalent: ""); item.isEnabled = false; menu.addItem(item) }
         menu.addItem(.separator())
@@ -418,9 +421,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         menu.items.last?.state = preferences["showWorkspaceRecents"] as? Bool == true ? .on : .off
         add(settings.text("清空最近记录", "Clear Recent"), key: "", action: "clearRecent", to: menu)
     }
+    private func recentSymbol(for url: URL) -> String {
+        if url.hasDirectoryPath { return "folder" }
+        let ext = url.pathExtension.lowercased()
+        if ["md", "markdown"].contains(ext) { return "doc.richtext" }
+        guard let type = UTType(filenameExtension: ext) else { return "doc" }
+        if type.conforms(to: .pdf) { return "doc.text.image" }
+        if type.conforms(to: .image) { return "photo" }
+        if type.conforms(to: .sourceCode) { return "chevron.left.forwardslash.chevron.right" }
+        if type.conforms(to: .spreadsheet) { return "tablecells" }
+        if type.conforms(to: .presentation) { return "rectangle.on.rectangle" }
+        if type.conforms(to: .text) || ["doc", "docx", "pages"].contains(ext) { return "doc.text" }
+        if type.conforms(to: .archive) { return "archivebox" }
+        if type.conforms(to: .audiovisualContent) { return "play.rectangle" }
+        return "doc"
+    }
     private func sendRecentLocations() {
         guard ready else { return }; recentIDs.removeAll()
-        let items: [[String: String]] = recent.visibleURLs(includeWorkspaceFiles: preferences["showWorkspaceRecents"] as? Bool == true).map { url in let id = UUID().uuidString; recentIDs[id] = url; return ["id": id, "name": url.lastPathComponent, "path": url.path] }
+        let items: [[String: Any]] = recent.visibleURLs(includeWorkspaceFiles: preferences["showWorkspaceRecents"] as? Bool == true).map { url in
+            let id = UUID().uuidString; recentIDs[id] = url
+            return ["id": id, "name": url.lastPathComponent, "path": url.path, "directory": url.hasDirectoryPath]
+        }
         emit(["kind": "recentLocations", "items": items])
     }
     private func openLocation(_ url: URL, preview: Bool = false, requestID: String = "", workspaceEntry: (id: String, generation: String, identity: FileIdentity)? = nil, fragment: String? = nil) async {
@@ -438,7 +459,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
                 latestWorkspaceRequest = nil
                 let snapshot = try await workspace.open(url)
                 let value = try JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot))
-                recent.note(url); updateRecentMenu(); _ = try await deliver(["kind": "workspace", "workspace": value]); return
+                recent.note(URL(fileURLWithPath: url.path, isDirectory: true)); updateRecentMenu()
+                _ = try await deliver(["kind": "workspace", "workspace": value]); return
             }
             guard values.isRegularFile == true, values.isPackage != true else { throw WorkspaceFailure.unavailable }
             do {

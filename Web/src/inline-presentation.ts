@@ -1,4 +1,4 @@
-import { StateEffect, type EditorState } from '@codemirror/state';
+import { findClusterBreak, StateEffect, type EditorState } from '@codemirror/state';
 import { ensureSyntaxTree, syntaxTree } from '@codemirror/language';
 import { Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate } from '@codemirror/view';
 import type { Tree } from '@lezer/common';
@@ -18,9 +18,14 @@ export function sourceLinkTarget(state: EditorState, position: number, context: 
   return link ? linkTarget(state.sliceDoc(link.from, link.to), context) : null;
 }
 
+type InlineRange = ReturnType<Decoration['range']>;
+const closingRun = /^[、。，．；：！？…％,.;:!?%\p{Pe}\p{Pf}]+/u;
+const punctuationJoin = Decoration.mark({ class: 'keep-closing-punctuation' });
+
 /** The same inline presentation is used in paragraphs and table cell editors. Source is never rewritten. */
-export function inlineDecorations(state: EditorState, tree: Tree, from: number, to: number, context: ReferenceContext = emptyReferences, reveal = true, inTables = false): ReturnType<Decoration['range']>[] {
-  const result: ReturnType<Decoration['range']>[] = [];
+export function inlineDecorations(state: EditorState, tree: Tree, from: number, to: number, context: ReferenceContext = emptyReferences, reveal = true, inTables = false, joins?: InlineRange[]): InlineRange[] {
+  const result: InlineRange[] = [];
+  const hiddenEnds = new Map<number, number>();
   const mark = (from: number, to: number, className: string, attributes?: Record<string, string>) => {
     if (to > from) result.push(Decoration.mark({ class: className, attributes }).range(from, to));
   };
@@ -32,6 +37,7 @@ export function inlineDecorations(state: EditorState, tree: Tree, from: number, 
     if (['EmphasisMark', 'StrikethroughMark', 'CodeMark'].includes(name)) {
       const editing = reveal && state.selection.ranges.some(range => range.empty && range.head >= node.from && range.head <= node.to);
       mark(node.from, node.to, editing ? 'editing-syntax-marker' : 'syntax-marker');
+      if (joins && !editing && node.to === node.parent?.to) hiddenEnds.set(node.to, node.from);
     }
     if (name === 'Link' || name === 'Autolink') {
       const href = linkTarget(state.sliceDoc(node.from, node.to), context);
@@ -42,23 +48,42 @@ export function inlineDecorations(state: EditorState, tree: Tree, from: number, 
       const expanded = reveal && state.selection.ranges.some(range => range.empty ? range.head >= node.from && range.head <= node.to : range.from < node.to && range.to > node.from);
       const className = 'link-syntax' + (expanded ? ' expanded' : '');
       mark(node.from, marks[0].to, className); mark(marks[1].from, node.to, className);
+      if (joins && !expanded) hiddenEnds.set(node.to, marks[1].from);
     }
   } });
+  // Zero-size syntax can still introduce Unicode break opportunities. Keep the last
+  // visible grapheme, hidden closing syntax and following punctuation in one run.
+  if (joins && hiddenEnds.size) {
+    const hiddenStarts = new Set(hiddenEnds.values());
+    for (const [end, closingStart] of hiddenEnds) {
+      if (hiddenStarts.has(end) || !closingRun.test(state.sliceDoc(end, Math.min(end + 2, state.doc.length)))) continue;
+      let start = closingStart;
+      while (hiddenEnds.has(start)) start = hiddenEnds.get(start)!;
+      const line = state.doc.lineAt(start);
+      if (start <= line.from || end >= line.to) continue;
+      const offset = findClusterBreak(line.text, start - line.from, false);
+      const run = closingRun.exec(line.text.slice(end - line.from))?.[0];
+      if (run && !/\s/u.test(line.text.slice(offset, start - line.from))) joins.push(punctuationJoin.range(line.from + offset, end + run.length));
+    }
+  }
   return result;
 }
 export function cellInlinePresentation() {
   const focusEffect = StateEffect.define<null>();
   const plugin = ViewPlugin.fromClass(class {
     decorations: DecorationSet = Decoration.none;
+    joins: DecorationSet = Decoration.none;
     constructor(readonly view: EditorView) { this.refresh(); }
     refresh() {
       const state = this.view.state, focused = this.view.dom.contains(this.view.contentDOM.ownerDocument.activeElement);
-      this.decorations = Decoration.set(inlineDecorations(state, syntaxTree(state), 0, state.doc.length, emptyReferences, focused), true);
+      const joins: InlineRange[] = [];
+      this.decorations = Decoration.set(inlineDecorations(state, syntaxTree(state), 0, state.doc.length, emptyReferences, focused, false, joins), true);
+      this.joins = Decoration.set(joins, true);
     }
     update(update: ViewUpdate) { if (update.docChanged || update.selectionSet || update.focusChanged || update.startState !== update.state) this.refresh(); }
   }, { decorations: value => value.decorations });
   const changed = (_event: Event, view: EditorView) => {
     queueMicrotask(() => { if (view.dom.isConnected) view.dispatch({ effects: focusEffect.of(null) }); }); return false;
   };
-  return [plugin, EditorView.domEventHandlers({ focus: changed, blur: changed })];
+  return [plugin, EditorView.outerDecorations.of(view => view.plugin(plugin)?.joins ?? Decoration.none), EditorView.domEventHandlers({ focus: changed, blur: changed })];
 }

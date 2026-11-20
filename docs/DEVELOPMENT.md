@@ -108,7 +108,7 @@ python3 Scripts/release.py Dist/<最终构建目录>/<本次构建> --notes <本
 - 原生发送`imageStorage`只包含粘贴位置和已配置图片根地址，不传凭据。S3配置只能原生表单写入；`resolvePaste(retry|local)`仅能处理已失败待决的同一图片任务。待决任务保留原剪贴板图片数据，重试不重新读取系统剪贴板；运行中配置变化取消旧上传，迟到回执按代次拒绝。
 - 标签关闭使用带 revision 的 `closeDocument/closeReceipt`。全部关闭使用原生请求、Web 逐文档决策、最终短冻结与 `closeAllResult/closeAllReceipt`；保存/图片/新输入均不得绕过确认。
 - 新命令必须同时更新原生 schema、Web 发送/接收、失效/重放处理及接口说明，不能允许文档传任意路径或扩展成系统命令通道。
-- 导航消息 `rememberPosition(documentID,mode,line,fraction)` 只存行／块比例，路径由原生登记文档提供，批准关闭后持久化；装载 `resume` 供5秒显式跳转。最近记录由原生发送 `recentLocations` 带不透明条目ID，`openRecent(entryID)`、`removeRecent(entryIDs)` 不接受路径；`clearRecent` 清除两类来源，`home` 清空活动标题但不关闭文档或文件夹；清除位置记录发送 `clearPositions`。
+- 导航消息 `rememberPosition(documentID,mode,line,fraction)` 只存行／块比例，路径由原生登记文档提供，批准关闭后持久化；装载 `resume` 供5秒显式跳转。最近记录由原生发送 `recentLocations` 带不透明条目ID和仅用于呈现的 `directory` 布尔值；该值来自已登记的文件 URL 目录标记，绘制图标不访问记录里的目标。`openRecent(entryID)`、`removeRecent(entryIDs)` 不接受路径；`clearRecent` 清除两类来源，`home` 清空活动标题但不关闭文档或文件夹；清除位置记录发送 `clearPositions`。
 - `exportDocument(documentID,printing,mode)` 只由菜单／用户动作触发，`mode`仅接受edit／source／read供打印选择当前呈现的行距基准，不能接收任意排版值或路径；PDF／Word导出始终以阅读行距为默认，独立读取各自记忆的配置。原生系统面板决定输出URL。原生调用 `exportSnapshot(id)` 获取 `{html,resources}`，图片仍经同文档 ImageStore 授权读取并经ImageIO尺寸预检和后台有界转换；独立非持久静态WebView通过DOM属性替换内嵌资源，不能正则扫描／全局替换文档文字。等待字体／图片／图表完成后输出。
 - DOCX以语义树生成OOXML和去重内嵌图片，只跨进程回传短图片ID及各图片的一份编码；编号先写全部abstractNum再写num。PDF不生成Word对象树，按可见文字行、图片／图表及表格行计算有限分页边界，再由WebKit逐区域生成保留文本的PDF、CoreGraphics合成带页边距的A4，并以PDFKit按标题和分页坐标生成书签；不用整页截图替代正文。系统打印使用生成的PDF经PDFKit呼出面板，不直接循环WebKit的NSPrintOperation。
 - 输出安全上限：512图片引用、64MiB输入图片、96MiB转换PNG／32M累计像素、源图预检100M像素、输出栅格最长边2400px；PDF最多1000页、捕获128MiB、最终200MiB。不以截断内容冒充成功；超限或资源失败保护当前编辑及已有输出，输出原子写入。
