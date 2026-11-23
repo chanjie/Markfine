@@ -14,18 +14,11 @@ import { imageOccurrences, fittedImageWidth } from './image-syntax';
 import { pendingListLine, tableConstruction, tableCellWriteback } from './markdown-input-state';
 import { sourceTablePosition, sourceTablePresentation } from './table-construction';
 import { listWrap, listWrapPrefix } from './list-wrap';
-import { wrappedCaret } from './wrapped-caret';
+import { composition, composingEffect, editorCaret } from './editor-caret';
 import { isPreviewImage } from './image-controls';
 
-export const composingEffect = StateEffect.define<boolean>();
+export { composition, composingEffect } from './editor-caret';
 const viewportEffect = StateEffect.define<{ from: number; to: number }>();
-export const composition = StateField.define<boolean>({
-  create: () => false,
-  update: (value, transaction) => {
-    for (const effect of transaction.effects) if (effect.is(composingEffect)) value = effect.value;
-    return value;
-  }
-});
 const viewport = StateField.define<{ from: number; to: number }>({
   create: state => ({ from: 0, to: Math.min(state.doc.length, 6_000) }),
   update: (value, transaction) => {
@@ -617,11 +610,5 @@ export function blockPreview(documentID: string, hydrate: (element: HTMLElement)
     }
     destroy() { cancelAnimationFrame(this.frame); clearTimeout(this.timer); }
   });
-  return [composition, viewport, referenceIndex, editorPreferences, sourceMode, revealedImage, field, listWrap(composition), visible, imageLoader, renderedSelection, wrappedCaret(composition), scrollToImageSource, EditorView.domEventHandlers({
-    compositionstart: (_event, view) => { view.dispatch({ effects: composingEffect.of(true) }); return false; },
-    compositionend: (_event, view) => {
-      queueMicrotask(() => { if (!view.composing) view.dispatch({ effects: composingEffect.of(false) }); });
-      return false;
-    }
-  })];
+  return [viewport, referenceIndex, editorPreferences, sourceMode, revealedImage, field, listWrap(composition), visible, imageLoader, renderedSelection, editorCaret(), scrollToImageSource];
 }

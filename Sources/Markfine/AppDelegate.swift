@@ -967,7 +967,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
             panel.title = settings.text("保存流程图 PNG", "Save Diagram PNG")
             panel.allowedContentTypes = [.png]
             panel.canCreateDirectories = true
-            panel.directoryURL = document.url?.deletingLastPathComponent()
+            panel.directoryURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
             let name = document.url.map { $0.deletingPathExtension().lastPathComponent } ?? "Mermaid"
             panel.nameFieldStringValue = name + "-diagram.png"
             let response: NSApplication.ModalResponse = await withCheckedContinuation { continuation in

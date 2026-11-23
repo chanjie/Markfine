@@ -3,6 +3,7 @@ import { defaultKeymap, isolateHistory, cursorCharLeft, cursorCharRight, cursorL
 import { EditorView, WidgetType, keymap, type KeyBinding } from '@codemirror/view';
 import { editorMarkdown } from './editor-language';
 import { cellInlinePresentation } from './inline-presentation';
+import { composition, editorCaret } from './editor-caret';
 import { t } from './localization';
 import { pairedPunctuation } from './paired-punctuation';
 import { formatTransaction } from './commands';
@@ -199,7 +200,7 @@ class TableController {
     const selection=this.parent.state.selection.main,cell=cells.find(cell=>selection.from>=cell.from&&selection.to<=cell.to);
     return cell?(selection.empty?{from:cell.from,to:cell.to,selected:false}:{from:selection.from,to:selection.to,selected:true}):undefined;
   }
-  get composing(): boolean { return this.views.some(view => view.composing); }
+  get composing(): boolean { return this.views.some(view => view.composing || view.state.field(composition)); }
   get start(): number { return this.from; }
   get end(): number { return this.from + this.source.length; }
   deleteFocusedCell(): boolean { return this.clearCell(this.views.findIndex(view => view.dom.contains(document.activeElement))); }
@@ -246,7 +247,7 @@ class TableController {
         for (const cell of row.cells) {
           const td = document.createElement(row.header ? 'th' : 'td'); td.dataset.row = String(rows.indexOf(row)); td.dataset.column = String(row.cells.indexOf(cell)); tr.append(td);
           const index = this.views.length;
-          const view = new EditorView({ parent: td, state: EditorState.create({ doc: cell.text, extensions: [editorMarkdown(), cellInlinePresentation(), EditorView.lineWrapping, pairedPunctuation(),
+          const view = new EditorView({ parent: td, state: EditorState.create({ doc: cell.text, extensions: [editorMarkdown(), cellInlinePresentation(), EditorView.lineWrapping, pairedPunctuation(), editorCaret(),
             EditorView.editorAttributes.of({ class: 'table-cell-editor' }), EditorView.contentAttributes.of({ 'aria-label': row.header ? t('表头单元格', 'Table header cell') : t('表格单元格', 'Table cell') }),
             EditorState.transactionFilter.of(transaction => transaction.docChanged && (this.parent.state.readOnly || /[\r\n]/.test(transaction.newDoc.toString())) ? [] : transaction),
               keymap.of([{ key: 'Tab', run: () => this.move(index, 1) }, { key: 'Shift-Tab', run: () => this.move(index, -1) },

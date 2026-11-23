@@ -1,7 +1,7 @@
 import { EditorState, StateEffect, StateField, type Text } from '@codemirror/state';
 import { invertedEffects } from '@codemirror/commands';
 import { Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate } from '@codemirror/view';
-import { composition, composingEffect } from './preview';
+import { editorCaret } from './editor-caret';
 import { editorPreferences, sourceMode } from './editor-preferences';
 import { highlightCode } from './code-highlighting';
 
@@ -111,8 +111,5 @@ export function textPresentation(language: string) {
       return Decoration.set(result, true);
     }
   }, { decorations: plugin => plugin.decorations });
-  return [composition, sourceMode, editorPreferences, styles, EditorView.domEventHandlers({
-    compositionstart: (_event, view) => { view.dispatch({ effects: composingEffect.of(true) }); return false; },
-    compositionend: (_event, view) => { queueMicrotask(() => { if (!view.composing) view.dispatch({ effects: composingEffect.of(false) }); }); return false; }
-  })];
+  return [sourceMode, editorPreferences, styles, editorCaret()];
 }

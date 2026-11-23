@@ -1,7 +1,7 @@
 import type { EditorView } from '@codemirror/view';
 import { tableCaretRect } from './table-editor';
 import { referenceIndex } from './reference-context';
-import { imageBoundaryRect } from './wrapped-caret';
+import { imageBoundaryRect } from './editor-caret';
 
 const animations = new WeakMap<HTMLElement, { frame: number; timer: number; top: number; left: number }>();
 export function stopScroll(element: HTMLElement): void {

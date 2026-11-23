@@ -49,7 +49,7 @@ In Live editing mode, click an image to edit its Markdown reference. The referen
 
 When editing Mermaid, the source stays above the diagram. If the source contains an error, the last valid diagram remains visible with an error message.
 
-Open a diagram in a larger view, zoom it independently and drag to explore without changing the document zoom. Use the preview toolbar to save the entire diagram as a PNG at 100% size. Flowcharts, sequence diagrams, class diagrams, state diagrams, ER diagrams and Gantt charts are all generated offline.
+Open a diagram in a larger view, zoom it independently and drag to explore without changing the document zoom. Use the preview toolbar to save the entire diagram as a PNG at 100% size. The Save dialog opens in Downloads by default. Flowcharts, sequence diagrams, class diagrams, state diagrams, ER diagrams and Gantt charts are all generated offline.
 
 ### Export and Quick Look
 

@@ -26,11 +26,35 @@ export class DiagramViewer {
     this.status = document.createElement('div'); this.status.className = 'diagram-status'; this.status.setAttribute('role', 'status'); this.status.hidden = true;
     this.dialog.append(toolbar, this.canvas, this.status); document.body.append(this.dialog);
     this.canvas.addEventListener('wheel', event => { if (event.metaKey || event.ctrlKey) { event.preventDefault(); event.stopPropagation(); this.zoom(Math.exp(-event.deltaY * .004)); } }, { passive: false });
-    let drag: { x: number; y: number; left: number; top: number } | undefined;
-    this.canvas.onpointerdown = event => { if (event.button !== 0 || event.ctrlKey) return; drag = { x: event.clientX, y: event.clientY, left: this.canvas.scrollLeft, top: this.canvas.scrollTop }; this.canvas.setPointerCapture(event.pointerId); this.canvas.classList.add('dragging'); };
-    this.canvas.onpointermove = event => { if (drag) this.canvas.scrollTo(drag.left - event.clientX + drag.x, drag.top - event.clientY + drag.y); };
-    this.canvas.onpointerup = this.canvas.onpointercancel = this.canvas.onlostpointercapture = () => { drag = undefined; this.canvas.classList.remove('dragging'); };
-    this.dialog.onclose = () => { if (!this.dialog.open) { this.stage.replaceChildren(); this.svg = undefined; } };
+    let drag: { id: number; x: number; y: number; left: number; top: number } | undefined;
+    const endDrag = () => {
+      const id = drag?.id;
+      drag = undefined;
+      this.canvas.classList.remove('dragging');
+      if (id !== undefined && this.canvas.hasPointerCapture(id)) this.canvas.releasePointerCapture(id);
+    };
+    this.canvas.onpointerdown = event => {
+      if (drag || !event.isPrimary || event.button !== 0 || event.ctrlKey || !this.stage.contains(event.target as Node)) return;
+      event.preventDefault();
+      this.canvas.focus({ preventScroll: true });
+      this.canvas.setPointerCapture(event.pointerId);
+      drag = { id: event.pointerId, x: event.clientX, y: event.clientY, left: this.canvas.scrollLeft, top: this.canvas.scrollTop };
+      this.canvas.classList.add('dragging');
+    };
+    this.canvas.ondragstart = event => event.preventDefault();
+    this.canvas.onpointermove = event => {
+      if (drag?.id !== event.pointerId) return;
+      // Discard movement beyond the scroll edges, so reversing direction pans
+      // immediately and repeated movement against a boundary does not scroll.
+      const left = Math.max(0, Math.min(this.canvas.scrollWidth - this.canvas.clientWidth, drag.left + drag.x - event.clientX));
+      const top = Math.max(0, Math.min(this.canvas.scrollHeight - this.canvas.clientHeight, drag.top + drag.y - event.clientY));
+      if (left !== drag.left || top !== drag.top) this.canvas.scrollTo({ left, top, behavior: 'instant' });
+      drag = { id: drag.id, x: event.clientX, y: event.clientY, left, top };
+    };
+    this.canvas.onpointerup = this.canvas.onpointercancel = this.canvas.onlostpointercapture = event => {
+      if (drag?.id === event.pointerId) endDrag();
+    };
+    this.dialog.onclose = () => { if (!this.dialog.open) { endDrag(); this.stage.replaceChildren(); this.svg = undefined; } };
     this.dialog.onkeydown = event => { if (event.key === '+' || event.key === '=') { event.preventDefault(); this.zoom(1.15); } else if (event.key === '-') { event.preventDefault(); this.zoom(1 / 1.15); } };
   }
   get open(): boolean { return this.dialog.open; }
