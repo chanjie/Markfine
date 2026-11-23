@@ -1,10 +1,11 @@
 import './offline-policy';
 import { Compartment, EditorSelection, EditorState, Transaction, type TransactionSpec } from '@codemirror/state';
 import { EditorView, keymap } from '@codemirror/view';
-import { syntaxHighlighting, defaultHighlightStyle, syntaxTree } from '@codemirror/language';
+import { syntaxTree } from '@codemirror/language';
+import { markdownSourceHighlighting } from './markdown-source-highlighting';
 import { defaultKeymap, history, historyKeymap, isolateHistory, redo, undo } from '@codemirror/commands';
 import { editorMarkdown } from './editor-language';
-import { blockPreview, composition } from './preview';
+import { activateImageSource, blockPreview, composition, navigateImageVertically } from './preview';
 import { SaveMachine, protectClose, protectCloseAll, type Context } from './save-machine';
 import { formatTransaction, findMatch, replacementChanges, literalPattern, physicalFormatShortcut } from './commands';
 import { deletionTransaction } from './deletion';
@@ -25,6 +26,7 @@ import { showHelp } from './help';
 import { renderEmptyState } from './empty-state';
 import { WorkspaceBrowser, type WorkspaceEntry } from './workspace-browser';
 import { DiagramViewer } from './diagram-viewer';
+import { diagramPNG } from './diagram-png';
 import { replaceablePreview } from './preview-state';
 import { tabLabel, closeTargets, showTabMenu, installReadingTabs, installTabLabelMotion, pathTooltip, type TabCloseScope } from './tab-navigation';
 import { SearchHighlights } from './search-highlights';
@@ -37,7 +39,8 @@ import { sourceLinkTarget } from './inline-presentation';
 import { referenceIndex } from './reference-context';
 import { chapterRange,paragraphRange,copyMarkdown,imageSources,inlinePlainText,type SourceRange } from './content-fragment';
 import { replaceImageDestinations } from './image-syntax';
-import { ImageControls } from './image-controls';
+import { ImageControls, isPreviewImage } from './image-controls';
+import { ImageContextSelection } from './image-context-selection';
 import { contextMenu, preserveContextSelection, isContextGesture } from './context-menu';
 import { slashMenu } from './slash-menu';
 import { pairedPunctuation } from './paired-punctuation';
@@ -101,6 +104,8 @@ export class EditorApplication {
   private readingPosition = 0;
   private wasEmpty = true;
   private recentItems: RecentItem[] = [];
+  private missingRecentID = '';
+  private recentNoticeTimer = 0;
   private managingRecents = false;
   private selectedRecents = new Set<string>();
   private collapsed = new Map<string, Set<number>>();
@@ -109,7 +114,15 @@ export class EditorApplication {
   private latestOpenRequest = '';
   private openRequests = new Map<string, { replaceID?: string; pin: boolean; link?: boolean }>();
   private stalePreviewIDs = new Set<string>();
-  private readonly diagramViewer = new DiagramViewer();
+  private readonly diagramViewer = new DiagramViewer(async (svg, documentID) => {
+    const png = await diagramPNG(svg, async resources => {
+      const result = await this.request('diagramResources', { documentID, resources });
+      if (result.outcome !== 'success') throw new Error();
+      return result.resources as Record<string, string>;
+    });
+    if (!this.diagramViewer.open || this.activeID !== documentID) return 'cancelled';
+    return String((await this.request('saveDiagramPNG', { documentID, png })).outcome);
+  });
   private diagramTimers = new WeakMap<HTMLElement, number>();
   private diagramPromises = new WeakMap<HTMLElement, Promise<void>>();
   private positionJump = 0;
@@ -120,9 +133,18 @@ export class EditorApplication {
   private searchRoom = 0;
   private readonly highlights = new SearchHighlights(() => byID(this.reading ? 'reader-content' : 'editor'));
   private readonly copyHighlight = new CopyHighlight();
+  private readonly imageContextSelection = new ImageContextSelection(() => this.view);
   private diagnostics = new Map<string, number>();
   private readonly documentTransition = new DocumentTransition(byID('main'), byID('document-title'));
-  private readonly imageControls=new ImageControls({source:id=>this.documents.get(id)?.state.doc.toString(),canEdit:id=>this.activeID===id&&!this.reading&&!this.composing()&&!this.documents.get(id)?.imageLocked&&!this.documents.get(id)?.copyLocked&&!this.closing,zoom:()=>this.zoom,change:(id,change)=>{this.edit(id,{changes:change,annotations:isolateHistory.of('full'),userEvent:'input.imageSize'});},measure:()=>this.view?.requestMeasure()});
+  private readonly imageControls=new ImageControls({
+    source:id=>this.documents.get(id)?.state.doc.toString(),
+    canEdit:id=>!this.reading&&this.canCopyImage(id),
+    canCopy:id=>this.canCopyImage(id),
+    copy:(id,source,asset)=>{if(this.canCopyImage(id))void this.copyContent(undefined,false,source,true,asset);},
+    zoom:()=>this.zoom,
+    change:(id,change)=>{this.edit(id,{changes:change,annotations:isolateHistory.of('full'),userEvent:'input.imageSize'});},
+    measure:()=>this.view?.requestMeasure()
+  });
   private readonly workspaceBrowser = new WorkspaceBrowser((kind, fields) => this.post(kind, fields), (entry, generation, pin) => this.openWorkspaceFile(entry, generation, pin),
     value => { this.applyPreferences({ showAllFiles: value }); this.persistPreference('showAllFiles', value); }, () => { this.applyLayout(); this.renderChrome(); });
 
@@ -204,8 +226,33 @@ export class EditorApplication {
       cancelAnimationFrame(this.centerFrame); this.centerFrame = 0;
       for (const element of byID('main').querySelectorAll<HTMLElement>('.cm-scroller,.reader,pre,table,.diagram')) stopScroll(element);
     });
+    // A rendered image is not editable text. Cancel before CodeMirror's
+    // mousedown positions its caret at either edge of the replacement widget.
+    byID('editor').addEventListener('mousedown', event => {
+      if (!isPreviewImage(event.target)) return;
+      if (isContextGesture(event)) this.imageContextSelection.begin();
+      event.preventDefault();
+    }, true);
     byID('editor').addEventListener('pointerdown', event => {
-      if (event.button !== 0 || isContextGesture(event)) return;
+      if (!isPreviewImage(event.target)) return;
+      if (isContextGesture(event)) this.imageContextSelection.begin();
+      event.preventDefault();
+      this.pointerSelecting = false; this.pointerSelection = undefined;
+      this.documentTransition.cancel(); this.positionJump++; this.findGeneration++;
+      cancelAnimationFrame(this.centerFrame); this.centerFrame = 0;
+      if (this.view) stopScroll(this.view.scrollDOM);
+    }, true);
+    byID('editor').addEventListener('contextmenu', event => {
+      if (isPreviewImage(event.target)) this.imageContextSelection.protectMenu();
+    }, true);
+    byID('editor').addEventListener('click', event => {
+      if (event.button !== 0 || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey ||
+          this.composing() || this.closing || !this.view || !(event.target instanceof Element) ||
+          !event.target.closest('img[data-image-source],.image-placeholder[data-image-source]')) return;
+      if (activateImageSource(this.view, event.target)) { event.preventDefault(); event.stopPropagation(); }
+    }, true);
+    byID('editor').addEventListener('pointerdown', event => {
+      if (event.defaultPrevented || event.button !== 0 || isContextGesture(event)) return;
       this.documentTransition.cancel(); this.findGeneration++;
       const view = this.view; if (!view) return;
       stopScroll(view.scrollDOM);
@@ -248,6 +295,12 @@ export class EditorApplication {
     byID('editor').addEventListener('table-copy',event=>{const detail=(event as CustomEvent<{markdown:string;raw:boolean}>).detail;void this.copyContent(undefined,false,detail.markdown,detail.raw);});
     byID('editor').addEventListener('table-copy-request',event=>{void this.copyContent(undefined,!!(event as CustomEvent<{cut:boolean}>).detail.cut);});
     byID('dismiss-notice').onclick = () => this.setNotice('');
+    byID('dismiss-recent-notice').onclick = () => this.showRecentOpenNotice('');
+    byID('remove-missing-recent').onclick = () => {
+      const id = this.missingRecentID;
+      this.showRecentOpenNotice('');
+      if (id && this.recentItems.some(item => item.id === id)) this.post('removeRecent', { entryIDs: [id] });
+    };
     byID('cancel-paste').onclick = () => this.cancelPaste();
     byID('retry-paste').onclick=()=>this.resolvePaste('retry');byID('local-paste').onclick=()=>this.resolvePaste('local');
     byID<HTMLInputElement>('query').oninput = () => this.find(false, true);
@@ -348,7 +401,7 @@ export class EditorApplication {
     const textFile = message.textFile === true, language = typeof message.language === 'string' ? message.language : '';
     const state = EditorState.create({ doc: source, extensions: [
       history(), preserveLineEndings(source), EditorView.lineWrapping, pairedPunctuation(),
-      textFile ? textPresentation(language) : [editorMarkdown(), markdownInput(state => state.field(composition, false) === true), orderedListEditing(state => state.field(composition, false) === true), slashMenu(), blockPreview(id, element => this.hydrate(element, id)), documentOutline],
+      textFile ? textPresentation(language) : [editorMarkdown(), markdownInput(state => state.field(composition, false) === true), orderedListEditing(state => state.field(composition, false) === true), slashMenu(), blockPreview(id, element => this.hydrate(element, id)), documentOutline, this.imageContextSelection.filter],
       EditorView.scrollHandler.of((view, range, options) => {
         const pending = this.pendingMatch;
         if (options.y !== 'center' || pending?.view !== view || pending.position !== range.head) return false;
@@ -358,7 +411,7 @@ export class EditorApplication {
         queueMicrotask(pending.run); return true;
       }),
       locks.of(EditorState.readOnly.of(this.reading || message.unsupported === true)), numbers.of([]),
-      sourceStyles.of(this.sourceEditing && !textFile ? syntaxHighlighting(defaultHighlightStyle) : []),
+      sourceStyles.of(this.sourceEditing && !textFile ? markdownSourceHighlighting : []),
       keymap.of([
         { key: 'Tab', run: view => !this.sourceEditing && (sourceTableTab(view) || tableOwnsSelection(view) && focusTableSelection(view)) || markdownTab(view) },
         { key: 'Shift-Tab', run: view => !this.sourceEditing && (sourceTableTab(view, true) || tableOwnsSelection(view) && focusTableSelection(view)) || markdownTab(view, true) },
@@ -367,7 +420,8 @@ export class EditorApplication {
         // Consume this before CodeMirror's default Mod-/ comment command. The app owns
         // source/live presentation; a mode shortcut must never rewrite the Markdown.
         { key: 'Mod-/', run: () => { this.command('toggleSource'); return true; } },
-        ...(['left', 'right', 'up', 'down'] as const).map(direction => ({ key: 'Arrow' + direction[0].toUpperCase() + direction.slice(1), run: (view: EditorView) => !this.sourceEditing && navigateTable(view, direction) })),
+        ...(['left', 'right', 'up', 'down'] as const).map(direction => ({ key: 'Arrow' + direction[0].toUpperCase() + direction.slice(1), run: (view: EditorView) =>
+          !this.sourceEditing && ((direction === 'up' || direction === 'down') && navigateImageVertically(view, direction === 'down') || navigateTable(view, direction)) })),
         ...Object.entries({ 'Mod-b': 'bold', 'Mod-i': 'italic', 'Mod-k': 'link', 'Mod-Alt-k': 'inlineCode', 'Mod-Alt-c': 'codeBlock',
           'Mod-Alt-q': 'quote', 'Mod-Alt-o': 'ordered', 'Mod-Alt-u': 'unordered', 'Mod-Alt-x': 'task', 'Mod-Alt-t': 'table',
           'Ctrl-Shift-`': 'strike', 'Ctrl-Mod-i': 'image', 'Mod-]': 'indent', 'Mod-[': 'outdent',
@@ -396,7 +450,8 @@ export class EditorApplication {
         if (update.docChanged || update.selectionSet) this.renderOutline();
         if (update.docChanged || update.selectionSet || update.focusChanged) this.scheduleHint();
         if (update.docChanged && this.reading) this.renderReading();
-        if (update.docChanged || update.selectionSet && !update.startState.selection.eq(update.state.selection)) this.scheduleCenter();
+        if (update.docChanged || update.selectionSet && !update.startState.selection.eq(update.state.selection) &&
+            !update.transactions.some(tr => tr.isUserEvent('select.imageSource'))) this.scheduleCenter();
       })
     ] });
     const saves = new SaveMachine(context, id, state.doc, transport);
@@ -755,7 +810,11 @@ export class EditorApplication {
     this.renderChrome();
   }
 
-  private async copyContent(range?:SourceRange,cut=false,provided?:string,raw=false):Promise<void>{
+  private canCopyImage(id:string):boolean {
+    const item=this.active;
+    return !!item&&item.id===id&&!item.imageLocked&&!item.copyLocked&&!item.closeLocked&&!this.closing&&!this.composing();
+  }
+  private async copyContent(range?:SourceRange,cut=false,provided?:string,raw=false,asset?:{resource:string;path?:boolean}):Promise<void>{
     const item=this.active;if(!item||item.unsupported||item.imageLocked||item.copyLocked||item.closeLocked||this.composing()||cut&&this.reading)return;
     const state=item.state,before=state.doc,table=!range&&this.view?tableCopySelection(this.view):undefined;
     const implicitRange=range===undefined&&provided===undefined;
@@ -777,7 +836,9 @@ export class EditorApplication {
       if(!raw&&table?.syntheticHeader){const template=document.createElement('template');template.innerHTML=snapshot.html;template.content.querySelector('thead')?.remove();snapshot.html=template.innerHTML;}
       const bytes=(text:string)=>new TextEncoder().encode(text).length;
       if(bytes(snapshot.html)>32*1_048_576||snapshot.resources.length>512||snapshot.imageBindings.length>512||snapshot.resources.some(value=>bytes(value)>12_000)||snapshot.imageBindings.some(value=>bytes(value.source)>12_000||bytes(value.resource)>12_000))throw new Error(t('复制内容超过格式或资源上限，请缩小选区后重试。','The copied formatting or resources exceed the limit. Select a smaller range and try again.'));
-      const result=await this.request('copyFragment',{documentID:item.id,ticket,revision:item.saves.revision,markdown,snapshot,raw});
+      const result=asset
+        ? await this.request(asset.path?'copyImageLink':'copyImage',{documentID:item.id,ticket,resource:asset.resource})
+        : await this.request('copyFragment',{documentID:item.id,ticket,revision:item.saves.revision,markdown,snapshot,raw});
       if(result.outcome!=='success')throw new Error(String(result.error||t('复制未完成','Copy did not finish')));
       if(cut&&this.documents.has(item.id)&&item.state.doc===before){
         const changes=table?table.clear:range?[{from:range.from,to:range.to,insert:''}]:[];
@@ -852,6 +913,7 @@ export class EditorApplication {
     return this.mermaidPromise;
   }
   private hydrate(element: HTMLElement, documentID: string): void {
+    for (const placeholder of element.querySelectorAll<HTMLElement>('.image-placeholder[data-image-source]')) this.imageControls.bindCopyMenu(placeholder, documentID);
     for (const image of element.querySelectorAll<HTMLImageElement>('img')) {
       // Reading is a complete local render; do not leave document images waiting on editor viewport activity.
       image.loading = this.reading ? 'eager' : 'lazy';
@@ -874,7 +936,7 @@ export class EditorApplication {
         if (diagram.isConnected && diagram.dataset.renderToken === token) {
           const tools = document.createElement('div'); tools.className = 'diagram-tools';
           const expand = document.createElement('button'); expand.type = 'button'; expand.textContent = t('放大查看 ↗', 'Enlarge ↗'); expand.onmousedown = event => event.preventDefault();
-          expand.onclick = event => { event.preventDefault(); event.stopPropagation(); this.diagramViewer.show(svg); }; tools.append(expand);
+          expand.onclick = event => { event.preventDefault(); event.stopPropagation(); this.diagramViewer.show(svg, documentID); }; tools.append(expand);
           const canvas = document.createElement('div'); canvas.className = 'diagram-inline'; canvas.append(svg); diagram.replaceChildren(tools, canvas); this.view?.requestMeasure();
         }
       }).catch(error => {
@@ -1031,6 +1093,10 @@ export class EditorApplication {
       this.readingDocument=undefined;if(this.reading)this.renderReading();return true;
     }
     if (kind === 'recentLocations') { this.renderRecent((message.items ?? []) as RecentItem[]); return true; }
+    if (kind === 'recentOpenFailure') {
+      this.showRecentOpenNotice(String(message.text), typeof message.entryID === 'string' ? message.entryID : '');
+      return true;
+    }
     if (kind === 'clearPositions') { for (const item of this.documents.values()) item.resume = undefined; this.dismissResume(); return true; }
     if (this.workspaceBrowser.receive(message)) { if (kind === 'workspace') { this.latestOpenRequest = ''; this.openRequests.clear(); this.cleanupStalePreviews(''); } return true; }
     if (kind === 'openFailed') { if (message.openRequestID === this.latestOpenRequest) this.finishWorkspaceOpen(String(message.openRequestID), ''); return true; }
@@ -1058,7 +1124,7 @@ export class EditorApplication {
       }
       item.saves.receive(message); this.renderChrome();
     } else if (kind === 'pasteReceipt') this.pasteReceipt(message);
-    else if (kind === 'closeReceipt'||kind==='copyReceipt'||kind==='beginCopyReceipt') {
+    else if (kind === 'closeReceipt'||kind==='copyReceipt'||kind==='beginCopyReceipt'||kind==='diagramReceipt') {
       const id = String(message.requestID), resolve = this.requests.get(id); this.requests.delete(id); resolve?.(message);
     } else if (kind === 'closeAllReceipt') {
       const permitted = message.permitted === true;
@@ -1252,7 +1318,7 @@ export class EditorApplication {
     this.documentTransition.cancel();
     const enabled = this.reading ? true : !this.sourceEditing; if (this.reading) this.setReading(false);
     this.sourceEditing = enabled;
-    for (const item of this.documents.values()) this.edit(item.id, { effects: [sourceModeEffect.of(enabled), item.sourceStyles.reconfigure(enabled && !item.textFile ? syntaxHighlighting(defaultHighlightStyle) : [])] });
+    for (const item of this.documents.values()) this.edit(item.id, { effects: [sourceModeEffect.of(enabled), item.sourceStyles.reconfigure(enabled && !item.textFile ? markdownSourceHighlighting : [])] });
     this.applyLayout(); this.renderChrome();
     if (this.view && (enabled || !focusTableSelection(this.view))) this.view.focus();
   }
@@ -1306,9 +1372,21 @@ export class EditorApplication {
       this.setReading(false); this.edit(item.id, { selection: EditorSelection.cursor(line.from) }); this.view?.focus(); this.centerMatch(line.from, () => {});
     }
   }
+  private showRecentOpenNotice(text: string, id = ''): void {
+    clearTimeout(this.recentNoticeTimer);
+    this.missingRecentID = this.recentItems.some(item => item.id === id) ? id : '';
+    byID('remove-missing-recent').hidden = !this.missingRecentID;
+    byID('recent-open-notice-text').textContent = text;
+    byID('recent-open-notice').hidden = !text;
+    if (text) this.recentNoticeTimer = window.setTimeout(() => this.showRecentOpenNotice(''), 5000);
+  }
   private renderRecent(items: RecentItem[]): void {
     this.recentItems = items;
     const ids = new Set(items.map(item => item.id));
+    if (this.missingRecentID && !ids.has(this.missingRecentID)) {
+      this.missingRecentID = '';
+      byID('remove-missing-recent').hidden = true;
+    }
     this.selectedRecents = new Set([...this.selectedRecents].filter(id => ids.has(id)));
     byID('recent-list').replaceChildren(); byID('recent-empty').hidden = items.length > 0;
     byID('recent-actions').hidden = !this.managingRecents;
@@ -1328,7 +1406,7 @@ export class EditorApplication {
       const label = document.createElement('span'); label.className = 'recent-label';
       const name = document.createElement('span'), path = document.createElement('small'); name.textContent = item.name; path.textContent = item.path;
       label.append(name, path); button.append(fileIcon(fileKind(item.name, directory)), label);
-      button.onclick = () => this.post('openRecent', { entryID: item.id }); row.append(button);
+      button.onclick = event => { if (event.detail <= 1) this.post('openRecent', { entryID: item.id }); }; row.append(button);
       const remove = document.createElement('button'); remove.className = 'recent-remove'; remove.textContent = '×'; remove.setAttribute('aria-label', `${t('移除记录', 'Remove record')} ${item.name}`);
       remove.onclick = () => this.post('removeRecent', { entryIDs: [item.id] }); row.append(remove); byID('recent-list').append(row);
     }

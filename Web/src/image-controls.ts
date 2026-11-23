@@ -1,9 +1,14 @@
 import { fittedImageWidth,imageOccurrences,imageWidthChange,type ImageOccurrence } from './image-syntax';
 import type { ResourceChange } from './migration';
-import { contextMenu } from './context-menu';
+import { contextMenu, type MenuAction } from './context-menu';
+import { localImageURL } from './renderer';
 import { t } from './localization';
 
-interface ImageHost { source:(id:string)=>string|undefined;canEdit:(id:string)=>boolean;zoom:()=>number;change:(id:string,change:ResourceChange)=>void;measure:()=>void }
+export function isPreviewImage(target: EventTarget | null): boolean {
+  return target instanceof Element && !!target.closest('img[data-image-source],.image-placeholder[data-image-source],.image-size-button,.image-preview-block');
+}
+
+interface ImageHost { source:(id:string)=>string|undefined;canEdit:(id:string)=>boolean;canCopy:(id:string)=>boolean;copy:(id:string,source:string,asset?:{resource:string;path?:boolean})=>void;zoom:()=>number;change:(id:string,change:ResourceChange)=>void;measure:()=>void }
 export class ImageControls {
   constructor(private readonly host:ImageHost){}
   private available(image:HTMLImageElement):number{
@@ -22,11 +27,38 @@ export class ImageControls {
   refresh(){for(const image of document.querySelectorAll<HTMLImageElement>('#main img[data-image-source]'))this.fit(image);}
   bind(image:HTMLImageElement,id:string){
     const size=()=>{this.fit(image);this.host.measure();};image.onload=size;if(image.complete)size();
+    this.bindCopyMenu(image,id);
     if(!this.host.canEdit(id))return;
     let frame=image.parentElement;if(!frame?.classList.contains('image-frame')){frame=document.createElement('span');frame.className='image-frame';image.replaceWith(frame);frame.append(image);}
     const button=document.createElement('button');button.type='button';button.className='image-size-button';button.setAttribute('aria-haspopup','menu');button.textContent=t('显示比例','Image size');frame.append(button);
     button.onmousedown=e=>{e.preventDefault();e.stopPropagation();};button.onclick=e=>{e.preventDefault();e.stopPropagation();const r=button.getBoundingClientRect();this.menu(image,id,r.left,r.bottom);};
-    image.oncontextmenu=e=>{if(this.host.canEdit(id)){e.preventDefault();e.stopPropagation();this.menu(image,id,e.clientX,e.clientY);}};size();
+    size();
+  }
+  bindCopyMenu(target:HTMLElement,id:string):void {
+    const source=target.dataset.imageSource;
+    if (!source) return;
+    if (target instanceof HTMLImageElement) target.draggable=false;
+    target.oncontextmenu=event=>{
+      event.preventDefault();event.stopPropagation();
+      if (!this.host.canCopy(id)) return;
+      const image=target instanceof HTMLImageElement?target:undefined;
+      const resource=image?.getAttribute('src')??'';
+      const ready=!!image?.naturalWidth && new TextEncoder().encode(resource).length<=12_000;
+      const local=localImageURL(source,id);
+      const remote=/^https?:\/\//i.test(source);
+      const copyPath=!!local && new TextEncoder().encode(local).length<=12_000;
+      const current=()=>target.isConnected&&this.host.canCopy(id);
+      const actions:MenuAction[]=[
+        {label:t('复制原图','Copy Original Image'),disabled:!ready,run:()=>{if(ready&&current())this.host.copy(id,source,{resource});}},
+        {label:t('复制图片链接','Copy Image Link'),disabled:!copyPath&&!remote,run:()=>{
+          if(!current())return;
+          if(copyPath)this.host.copy(id,source,{resource:local,path:true});
+          else if(remote)this.host.copy(id,source);
+        }},
+      ];
+      if(image&&this.host.canEdit(id))actions.push(...this.sizeActions(image,id));
+      contextMenu(event.clientX,event.clientY,actions,'image-size-menu',true);
+    };
   }
   private occurrence(image:HTMLImageElement,id:string):ImageOccurrence|undefined {
     const source=this.host.source(id);if(source===undefined)return;
@@ -35,10 +67,14 @@ export class ImageControls {
     const matches=items.filter(item=>item.destination===image.dataset.imageSource&&item.width===(Number(image.dataset.imageWidth)||undefined));return matches.length===1?matches[0]:undefined;
   }
   private menu(image:HTMLImageElement,id:string,x:number,y:number){
-    const source=this.host.source(id),item=this.occurrence(image,id);if(source===undefined||!item||!image.naturalWidth)return;
+    const actions=this.sizeActions(image,id);
+    if(actions.length)contextMenu(x,y,actions,'image-size-menu');
+  }
+  private sizeActions(image:HTMLImageElement,id:string):MenuAction[]{
+    const source=this.host.source(id),item=this.occurrence(image,id);if(source===undefined||!item||!image.naturalWidth)return [];
     const maximum=()=>Math.max(0,Math.floor(this.available(image)/this.host.zoom()));
     const apply=(width?:number)=>{if(!this.host.canEdit(id)||this.host.source(id)!==source)return;if(width!==undefined&&width>maximum())return;const change=imageWidthChange(source,item.from,width);if(change)this.host.change(id,change);};
-    contextMenu(x,y,[{label:t('自动适应正文','Automatic fit'),run:()=>apply()},...[25,50,75,100,150,200].map(percent=>{const width=Math.max(1,Math.round(image.naturalWidth*percent/100));return {label:percent+'%',disabled:width>maximum()||image.naturalWidth*percent/100<1,run:()=>apply(width)};}),{label:t('自定义…','Custom…'),run:()=>this.custom(image,id,source,apply)}],'image-size-menu');
+    return [{label:t('自动适应正文','Automatic fit'),run:()=>apply()},...[25,50,75,100,150,200].map(percent=>{const width=Math.max(1,Math.round(image.naturalWidth*percent/100));return {label:percent+'%',disabled:width>maximum()||image.naturalWidth*percent/100<1,run:()=>apply(width)};}),{label:t('自定义…','Custom…'),run:()=>this.custom(image,id,source,apply)}];
   }
   private custom(image:HTMLImageElement,id:string,source:string,apply:(width?:number)=>void){
     const dialog=document.createElement('dialog');dialog.className='image-size-dialog';const form=document.createElement('form');form.method='dialog';

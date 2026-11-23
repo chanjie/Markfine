@@ -69,7 +69,7 @@ markdown.renderer.rules.image = (tokens, index, _options, env) => {
   const url = localImageURL(source, String(env?.documentID ?? '')) ?? remoteImageURL(source, String(env?.documentID ?? ''));
   const escape = markdown.utils.escapeHtml;
   const boundary = boundaryAttribute(token.meta);
-  if (!url) return `<span class="image-placeholder"${boundary}>${t('图片未加载', 'Image not loaded')} · ${escape(alt)} <code>${escape(source)}</code></span>`;
+  if (!url) return `<span class="image-placeholder" data-image-source="${escape(source)}"${boundary}>${t('图片未加载', 'Image not loaded')} · ${escape(alt)} <code>${escape(source)}</code></span>`;
   return `<img src="${escape(url)}" alt="${escape(alt)}" data-image-source="${escape(source)}"${width ? ` width="${width}" data-image-width="${width}"` : ''} loading="lazy" decoding="async"${boundary}>`;
 };
 

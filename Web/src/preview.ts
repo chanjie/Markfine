@@ -1,4 +1,4 @@
-import { EditorSelection, StateEffect, StateField, type EditorState, type Text, type Transaction } from '@codemirror/state';
+import { EditorSelection, EditorState, StateEffect, StateField, type Text, type Transaction } from '@codemirror/state';
 import { forceParsing } from '@codemirror/language';
 import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, type ViewUpdate } from '@codemirror/view';
 import type { Tree } from '@lezer/common';
@@ -14,6 +14,8 @@ import { imageOccurrences, fittedImageWidth } from './image-syntax';
 import { pendingListLine, tableConstruction, tableCellWriteback } from './markdown-input-state';
 import { sourceTablePosition, sourceTablePresentation } from './table-construction';
 import { listWrap, listWrapPrefix } from './list-wrap';
+import { wrappedCaret } from './wrapped-caret';
+import { isPreviewImage } from './image-controls';
 
 export const composingEffect = StateEffect.define<boolean>();
 const viewportEffect = StateEffect.define<{ from: number; to: number }>();
@@ -58,6 +60,99 @@ export function imageRanges(tree: Tree, doc: Text): readonly { from: number; to:
   imageRangeCache.set(tree, images); return images;
 }
 
+type ImageRange = { from: number; to: number };
+export const revealImageSource = StateEffect.define<ImageRange>({
+  map: (range, changes) => ({ from: changes.mapPos(range.from), to: changes.mapPos(range.to, 1) }),
+});
+const revealedImage = StateField.define<ImageRange | null>({
+  create: () => null,
+  update(value, tr) {
+    if (tr.state.field(sourceMode)) return null;
+    for (const effect of tr.effects) if (effect.is(revealImageSource)) return effect.value;
+    if (!tr.selection && !tr.docChanged) return value;
+    const head = tr.state.selection.main.head, previous = tr.startState.selection.main.head;
+    const kept = value && { from: tr.changes.mapPos(value.from), to: tr.changes.mapPos(value.to, 1) };
+    const images = imageRanges(tr.state.field(referenceIndex).tree, tr.state.doc);
+    return images.find(image => {
+      if (head < image.from || head > image.to) return false;
+      // Opening a document at position zero must not expand an image. Entering
+      // its source by keyboard or continuing to work at either edge should.
+      return head > image.from && head < image.to || kept?.from === image.from && kept.to === image.to ||
+        !!tr.selection && previous !== head;
+    }) ?? null;
+  }
+});
+
+export function activateImageSource(view: EditorView, target: Element): boolean {
+  const block = target.closest<HTMLElement>('.image-preview-block');
+  if (!block || !view.contentDOM.contains(block) || view.state.readOnly || view.composing ||
+      view.state.field(composition) || view.state.field(sourceMode)) return false;
+  const from = Number(block.dataset.sourceFrom), to = from + Number(block.dataset.sourceLength);
+  if (!imageRanges(view.state.field(referenceIndex).tree, view.state.doc).some(image => image.from === from && image.to === to)) return false;
+  view.dispatch({
+    selection: EditorSelection.cursor(to, -1),
+    effects: [revealImageSource.of({ from, to }), EditorView.scrollIntoView(to - 1, { y: 'nearest', yMargin: 6 })],
+    userEvent: 'select.imageSource'
+  });
+  view.focus();
+  return true;
+}
+
+/** Don't let the vertical geometry search scan through the height of a
+ * rendered image and land several source lines away. Preserve ordinary
+ * visual-line movement unless the result skips source lines across an image. */
+export function navigateImageVertically(view: EditorView, forward: boolean): boolean {
+  const { state } = view, cursor = state.selection.main;
+  if (view.composing || state.field(composition, false) || state.field(sourceMode, false) !== false ||
+      !cursor.empty || state.selection.ranges.length !== 1) return false;
+  const images = imageRanges(state.field(referenceIndex).tree, state.doc);
+  if (!images.length) return false;
+  const line = state.doc.lineAt(cursor.head);
+  const adjacentNumber = line.number + (forward ? 1 : -1);
+  if (adjacentNumber < 1 || adjacentNumber > state.doc.lines) return false;
+  const next = view.moveVertically(cursor, forward);
+  const nextLine = state.doc.lineAt(next.head);
+  const adjacent = state.doc.line(adjacentNumber);
+  const lowest = Math.min(line.from, nextLine.from, adjacent.from);
+  const highest = Math.max(line.to, nextLine.to, adjacent.to);
+  const nearImage = images.some(image => image.from <= highest && image.to >= lowest);
+  if (!nearImage) return false;
+  // A legitimate step on a wrapped line or onto the immediately adjacent
+  // source line is left to CodeMirror. A zero-height hidden image source can
+  // also produce a no-op at its edge; step onto the adjacent line in that case.
+  if (next.head !== cursor.head &&
+      (nextLine.number === adjacentNumber || nextLine.number === line.number &&
+      (forward ? next.head > cursor.head : next.head < cursor.head))) return false;
+  if (next.head === cursor.head && !images.some(image => image.from <= line.to && image.to >= line.from ||
+      image.from <= adjacent.to && image.to >= adjacent.from)) return false;
+  const start = view.coordsAtPos(cursor.head, cursor.assoc || 1);
+  const rect = view.contentDOM.getBoundingClientRect();
+  const goal = cursor.goalColumn ?? next.goalColumn ?? (start ? start.left - rect.left : undefined);
+  const glyph = adjacent.length ? view.coordsForChar(forward ? adjacent.from : adjacent.to - 1) : null;
+  const hit = glyph && goal != null ? view.posAndSideAtCoords({ x: rect.left + goal, y: (glyph.top + glyph.bottom) / 2 }) : null;
+  const pos = hit && hit.pos >= adjacent.from && hit.pos <= adjacent.to ? hit.pos :
+    Math.min(adjacent.to, adjacent.from + (goal != null ? Math.max(0, Math.round(goal / Math.max(1, view.defaultCharacterWidth))) : 0));
+  view.dispatch({ selection: EditorSelection.cursor(pos, hit?.pos === pos ? hit.assoc : pos === adjacent.to ? -1 : 1, undefined, goal),
+    scrollIntoView: true, userEvent: 'select' });
+  return true;
+}
+
+const scrollToImageSource = EditorState.transactionExtender.of(tr => {
+  // Respect commands with their own effects, including explicit scroll targets.
+  if (!tr.scrollIntoView || tr.effects.length) return null;
+  const { state } = tr, selection = state.selection.main;
+  if (state.field(sourceMode) || !selection.empty || !selection.head) return null;
+  const head = selection.head, last = state.doc.sliceString(head - 1, head);
+  if (last !== ')' && last !== ']') return null;
+  const images = imageRanges(state.field(referenceIndex).tree, state.doc);
+  if (!images.some(image => image.to === head)) return null;
+  // A native nearest-scroll request at the end of the source can address the
+  // block widget instead of text. Point it at the adjacent source character
+  // before the view measures that target; the actual selection stays put.
+  const margin = state.facet(EditorView.cursorScrollMargin);
+  return { effects: EditorView.scrollIntoView(head - 1, { xMargin: margin.x, yMargin: margin.y }) };
+});
+
 class ListMarker extends WidgetType {
   constructor(readonly text: string) { super(); }
   eq(other: ListMarker) { return this.text === other.text; }
@@ -94,6 +189,7 @@ class BlockWidget extends WidgetType {
   toDOM(view: EditorView): HTMLElement {
     const element = document.createElement('section');
     element.className = 'markdown-block';
+    if (this.imageHeights) element.classList.add('image-preview-block');
     element.dataset.sourceFrom = String(this.from);
     element.dataset.sourceLength = String(this.source.length);
     element.dataset.previewSource = this.source;
@@ -144,7 +240,7 @@ class BlockWidget extends WidgetType {
     this.hydrate(element); return true;
   }
   ignoreEvent(event: Event): boolean {
-    return event.target instanceof Element && !!event.target.closest('a,.image-size-button');
+    return this.imageHeights != null || event.target instanceof Element && !!event.target.closest('a,.image-size-button');
   }
   destroy(element: HTMLElement): void { imageObservers.get(element)?.disconnect(); imageObservers.delete(element); }
 }
@@ -191,7 +287,6 @@ function decorations(state: EditorState, documentID: string, hydrate: (element: 
   }
   const muted = (from: number, to: number) => focus && (active.name === 'Document' ? !(position >= from && position <= to) : (to < activeFrom || from > activeTo));
   const lines = new Map<number, Set<string>>();
-  const headingStarts = new Map<number, string>();
   const lineAttributes = new Map<number, Record<string, string>>();
   const lineClass = (from: number, to: number, className: string) => {
     for (let number = state.doc.lineAt(from).number; number <= state.doc.lineAt(to).number; number++) {
@@ -231,8 +326,6 @@ function decorations(state: EditorState, documentID: string, hydrate: (element: 
     const heading = /^(?:ATXHeading|SetextHeading)([1-6])$/.exec(name);
     if (heading) {
       lineClass(node.from, node.to, `live-heading live-h${heading[1]}`);
-      const first = state.doc.lineAt(node.from).from;
-      lineClass(first, first, 'heading-start'); headingStarts.set(first, 'H' + heading[1]);
     }
     if (name === 'Blockquote') lineClass(node.from, node.to, 'live-quote');
     if (name === 'FencedCode' || name === 'CodeBlock') {
@@ -270,7 +363,13 @@ function decorations(state: EditorState, documentID: string, hydrate: (element: 
     // CodeMirror a real block in its height map instead.
     result.push(Decoration.widget({ widget: new BlockWidget(source, image.from, documentID, index.context, hydrate,
       imageHeights, imageURL(source, index.context)), block: true, side: -1 }).range(image.to));
-    mark(image.from, image.to, 'image-reference');
+    const revealed = state.field(revealedImage);
+    if (revealed?.from === image.from && revealed.to === image.to) mark(image.from, image.to, 'image-reference');
+    else {
+      result.push(Decoration.replace({ inclusive: false }).range(image.from, image.to));
+      const first = state.doc.lineAt(image.from), last = state.doc.lineAt(image.to);
+      if (first.from === image.from && last.to === image.to) lineClass(first.from, last.to, 'image-source-collapsed');
+    }
   }
   // Virtual height changes can move the viewport away from a focused child
   // editor. Retain only its active table decoration so the existing cell DOM
@@ -285,7 +384,6 @@ function decorations(state: EditorState, documentID: string, hydrate: (element: 
   for (const [from, classes] of lines) {
     const attributes: Record<string, string> = { ...lineAttributes.get(from) };
     if (numbers) attributes['data-line'] = String(state.doc.lineAt(from).number);
-    if (headingStarts.has(from)) attributes['data-heading'] = headingStarts.get(from)!;
     result.push(Decoration.line({ class: [...classes].join(' ') + (numbers ? ' source-line-number' : ''), attributes }).range(from));
   }
   return { normal: Decoration.set(result, true), joins: Decoration.set(joins, true) };
@@ -340,7 +438,7 @@ function renderedPosition(view: EditorView, target: EventTarget | null, point: {
 
 const renderedSelection = EditorView.mouseSelectionStyle.of((view, event) => {
   if (event.button !== 0 || event.ctrlKey || view.composing || view.state.field(composition) ||
-      (event.target instanceof Element && event.target.closest('a'))) return null;
+      isPreviewImage(event.target) || (event.target instanceof Element && event.target.closest('a'))) return null;
   let start = renderedPosition(view, event.target, { x: event.clientX, y: event.clientY });
   if (start === null) return null;
   let original = view.state.selection;
@@ -478,7 +576,7 @@ export function blockPreview(documentID: string, hydrate: (element: HTMLElement)
       if (transaction.state.field(composition)) {
         return transaction.docChanged ? { normal: value.normal.map(transaction.changes), joins: value.joins.map(transaction.changes) } : value;
       }
-      if (transaction.docChanged || transaction.selection || transaction.effects.some(effect => effect.is(viewportEffect) || effect.is(composingEffect) || effect.is(preferencesEffect) || effect.is(sourceModeEffect)) ||
+      if (transaction.docChanged || transaction.selection || transaction.effects.some(effect => effect.is(viewportEffect) || effect.is(composingEffect) || effect.is(preferencesEffect) || effect.is(sourceModeEffect) || effect.is(revealImageSource)) ||
           transaction.startState.field(referenceIndex) !== transaction.state.field(referenceIndex)) {
         const next = decorations(transaction.state, documentID, hydrate, imageHeights, previewURL);
         return { normal: retainUnparsedActiveTable(value.normal, next.normal, transaction), joins: next.joins };
@@ -519,7 +617,7 @@ export function blockPreview(documentID: string, hydrate: (element: HTMLElement)
     }
     destroy() { cancelAnimationFrame(this.frame); clearTimeout(this.timer); }
   });
-  return [composition, viewport, referenceIndex, editorPreferences, sourceMode, field, listWrap(composition), visible, imageLoader, renderedSelection, EditorView.domEventHandlers({
+  return [composition, viewport, referenceIndex, editorPreferences, sourceMode, revealedImage, field, listWrap(composition), visible, imageLoader, renderedSelection, wrappedCaret(composition), scrollToImageSource, EditorView.domEventHandlers({
     compositionstart: (_event, view) => { view.dispatch({ effects: composingEffect.of(true) }); return false; },
     compositionend: (_event, view) => {
       queueMicrotask(() => { if (!view.composing) view.dispatch({ effects: composingEffect.of(false) }); });

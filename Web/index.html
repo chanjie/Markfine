@@ -23,6 +23,11 @@
     <div id="replace-row" class="find-row" hidden><label for="replacement" data-zh="替换" data-en="Replace">替换</label><input id="replacement" type="text" data-placeholder-zh="替换为" data-placeholder-en="Replace with" autocomplete="off"><button id="replace-one" data-zh="替换" data-en="Replace">替换</button><button id="replace-all" data-zh="全部替换" data-en="Replace all">全部替换</button></div>
   </section>
   <div id="notice" class="notice" role="status" hidden><span id="notice-text"></span><button id="dismiss-notice" aria-label="收起提示">×</button></div>
+  <div id="recent-open-notice" class="recent-open-notice" hidden>
+    <span id="recent-open-notice-text" role="status"></span>
+    <button id="remove-missing-recent" type="button" hidden data-zh="移除记录" data-en="Remove from Recent">移除记录</button>
+    <button id="dismiss-recent-notice" type="button" data-label-zh="关闭提示" data-label-en="Dismiss message" aria-label="关闭提示">×</button>
+  </div>
   <button id="resume-position" class="resume-position" hidden></button>
   <div id="paste-progress" class="paste-progress" role="status" hidden><span class="activity" aria-hidden="true"></span><span id="paste-label"></span><button id="retry-paste" hidden data-zh="重试" data-en="Retry">重试</button><button id="local-paste" hidden data-zh="改为本地" data-en="Use local storage">改为本地</button><button id="cancel-paste" data-zh="取消" data-en="Cancel">取消</button></div>
   <div class="workspace"><div id="left-navigation" class="left-navigation">

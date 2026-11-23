@@ -1,6 +1,7 @@
 import type { EditorView } from '@codemirror/view';
 import { tableCaretRect } from './table-editor';
 import { referenceIndex } from './reference-context';
+import { imageBoundaryRect } from './wrapped-caret';
 
 const animations = new WeakMap<HTMLElement, { frame: number; timer: number; top: number; left: number }>();
 export function stopScroll(element: HTMLElement): void {
@@ -42,7 +43,7 @@ export function scrollToPosition(view: EditorView, position: number): void {
   if (first && position <= first.to) { if (view.scrollDOM.scrollTop > 0) animateScroll(view.scrollDOM, 0); return; }
   const scroller = view.scrollDOM;
   const target = () => {
-    const caret = tableCaretRect(view) ?? view.coordsAtPos(position), viewport = scroller.getBoundingClientRect();
+    const caret = tableCaretRect(view) ?? imageBoundaryRect(view, position) ?? view.coordsAtPos(position), viewport = scroller.getBoundingClientRect();
     const block = !caret ? view.lineBlockAt(position) : null;
     const center = caret ? (caret.top + caret.bottom) / 2 : view.documentTop + block!.top + block!.height / 2;
     return scroller.scrollTop + center - (viewport.top + scroller.clientHeight / 2);
@@ -50,6 +51,7 @@ export function scrollToPosition(view: EditorView, position: number): void {
   const top = target();
   if (Math.abs(top - scroller.scrollTop) > 2) animateScroll(scroller, top, undefined, undefined, undefined, target);
 }
+
 export function readingScrollDistance(kind: string, height: number, viewport: number, line = 30): number {
   const max = viewport * .72;
   if (/^H[1-6]$/.test(kind)) return Math.min(max, Math.max(line * 2, height + 20));

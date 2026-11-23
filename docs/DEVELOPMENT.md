@@ -104,6 +104,9 @@ python3 Scripts/release.py Dist/<最终构建目录>/<本次构建> --notes <本
 - `state` 只传 revision/dirty/pending。保存按文档串行，成功更新对应快照基线，不替换当前正文/历史；超时保持占位和未确认结果，不能当取消。
 - 图片 `paste` 绑定文档、请求、revision、anchor/head；`cancelPaste` 与回执验证原任务。文件落盘后才插入，一次可撤销；取消后的回执不能生效。
 - `beginCopy(documentID,requestID)` 在Web异步快照生成前取得原生票据，记录文档、内部代次与系统剪贴板changeCount；`copyFragment`须携带票据、revision、Markdown与结构化快照，写入前复核票据及changeCount。`abortCopy`和失败释放占位，剪切只在写入成功且原正文仍一致时执行一次删除。复制会锁定目标的编辑／保存／关闭，其他标签可继续操作。
+- `copyImage(documentID,requestID,ticket,resource)` 复用复制票据，只接受当前文档的受控图片标识。经 ImageStore 或本标签 S3 缓存读取原字节，写入对应图片类型；不读取任意 URL 或启动传输。`copyImageLink` 仅接受该文档的本地图片标识，由 ImageStore 按相同范围解析为原样绝对路径，不读图片字节；远程链接沿用纯文本复制。
+- 图表预览使用 AppKit 主窗口本地监视器转发逐次放大增量。`diagramResources` 仅返回文档权限内的本地图表图片；Web 从已清理的当前 SVG 快照生成 100% PNG。`saveDiagramPNG` 不接收路径；原生检查类型、像素和会话，使用系统保存面板与原子写入。上限为每边 8192 像素、总计 1600 万像素及 32 MiB Base64 数据。
+- PNG 保存成功后使用已有本地通知与访达交接。通知按输出类型校验扩展名，PNG 与文档导出互不混用；请求权限和发送通知不延迟应用内保存回执。
 - 富文本通过受控语义树生成HTML、RTF／RTFD，图片全部内嵌，不解析外部HTML作为原生富文本输入。自有副本上限8MiB正文、512个资源、64MiB原始图片，编码总量160MiB；本地原始图片字节随副本携带，粘贴按语法节点改目标引用，S3图片保留链接。此能力不启用普通外部HTML／RTF格式化粘贴。
 - 原生发送`imageStorage`只包含粘贴位置和已配置图片根地址，不传凭据。S3配置只能原生表单写入；`resolvePaste(retry|local)`仅能处理已失败待决的同一图片任务。待决任务保留原剪贴板图片数据，重试不重新读取系统剪贴板；运行中配置变化取消旧上传，迟到回执按代次拒绝。
 - 标签关闭使用带 revision 的 `closeDocument/closeReceipt`。全部关闭使用原生请求、Web 逐文档决策、最终短冻结与 `closeAllResult/closeAllReceipt`；保存/图片/新输入均不得绕过确认。

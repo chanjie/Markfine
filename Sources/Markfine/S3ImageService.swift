@@ -36,6 +36,16 @@ actor S3ImageService {
         active[request] = (documentID, task); defer { active[request] = nil }
         return try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
     }
+    /// A clipboard command may reuse a preview already materialized for this
+    /// document, but must not start a transfer or access another document's cache.
+    func readCached(documentID: String, source: String) async throws -> LocalImage {
+        guard let profile = settings.profile else { throw ImageStoreFailure.denied }
+        let key = identity(profile, key: try profile.key(for: source)), epoch = generation
+        guard let reference = cached[documentID]?[key] else { throw ImageStoreFailure.unavailable }
+        let image = try await images.read(documentID: documentID, relativePath: reference)
+        guard settings.profile == profile, generation == epoch, cached[documentID]?[key] == reference else { throw ImageStoreFailure.denied }
+        return image
+    }
     private func serialRead(documentID: String, source: String, profile: S3Profile, key: String, epoch: Int, request: UUID) async throws -> LocalImage {
         try await acquire(request); defer { next(request) }
         try Task.checkCancellation(); guard settings.profile == profile, epoch == generation, await images.contains(documentID) else { throw S3Failure.superseded }

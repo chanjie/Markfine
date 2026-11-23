@@ -1,5 +1,6 @@
 import AppKit
 import Darwin
+import ImageIO
 import MarkfineCore
 import UniformTypeIdentifiers
 import WebKit
@@ -17,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     private let positions = ReadingPositions()
     private var pendingPositions: [String: ReadingPosition] = [:]
     private var recentIDs: [String: URL] = [:]
+    private var openingRecents: Set<URL> = []
     private var runtime: RuntimeDataStore!
     private var recentMenu: NSMenu?
     private var latestWorkspaceRequest: String?
@@ -61,6 +63,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     private var readingEnabled = false
     private let windowPaper = WindowPaper()
     private var physicalShortcutMonitor: Any?
+    private var magnificationMonitor: Any?
+    private var savingDiagram = false
+    private var diagramSaveRequests: [String] = []
     private func l(_ text: String) -> String {
         guard settings.english else { return text }
         if text.hasPrefix("文件操作失败") { return text.replacingOccurrences(of: "文件操作失败", with: "File operation failed").replacingOccurrences(of: "（", with: " (").replacingOccurrences(of: "，", with: ", ").replacingOccurrences(of: "）", with: ")") }
@@ -119,7 +124,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         webView.navigationDelegate = self
         webView.allowsBackForwardNavigationGestures = false
         webView.allowsMagnification = false
-        webView.addGestureRecognizer(NSMagnificationGestureRecognizer(target: self, action: #selector(magnifyContent(_:))))
         configureWindow(); configureMenu(); updateBackground()
         let cache = try runtime.startSession()
         try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
@@ -169,11 +173,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
             }
             return nil
         }
+        // A local monitor consumes each native delta before it can enter WebKit's
+        // gesture arbitration. Do not reset an in-progress gesture recognizer or
+        // forward the same physical pinch as both a native delta and a DOM event.
+        magnificationMonitor = NSEvent.addLocalMonitorForEvents(matching: .magnify) { [weak self] event in
+            guard let self, let window = self.window, event.window === window,
+                  NSApp.keyWindow === window, window.attachedSheet == nil, self.ready, !self.webFailed else { return event }
+            let delta = Double(event.magnification)
+            if delta.isFinite, delta != 0, event.phase != .cancelled {
+                self.enqueueDelivery(["kind": "hostCommand", "action": "zoom", "factor": max(0.1, 1 + delta)]) { [weak self] result in
+                    if case .failure(let error) = result { self?.fail("hostDeliveryFailure", error) }
+                }
+            }
+            return nil
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         if let physicalShortcutMonitor { NSEvent.removeMonitor(physicalShortcutMonitor) }
         physicalShortcutMonitor = nil
+        if let magnificationMonitor { NSEvent.removeMonitor(magnificationMonitor) }
+        magnificationMonitor = nil
     }
 
     private func configureMenu() {
@@ -254,7 +274,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         item.keyEquivalentModifierMask = modifiers; item.target = self; item.representedObject = action; menu.addItem(item)
     }
     @objc private func menuCommand(_ item: NSMenuItem) {
-        if let url = item.representedObject as? URL { Task { @MainActor in await openLocation(url) }; return }
+        if let url = item.representedObject as? URL { openRecent(url); return }
         guard let action = item.representedObject as? String else { return }
         if ["copy", "cut", "paste", "undo", "redo"].contains(action), NSApp.keyWindow !== window {
             NSApp.sendAction(Selector(action + ":"), to: nil, from: self); return
@@ -306,11 +326,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     private func preferencesChanged() {
         recent.enforceLimit()
         emit(["kind": "preferences", "preferences": preferences]); configureMenu(); updateWindowTitle(); updateBackground()
-    }
-    @objc private func magnifyContent(_ gesture: NSMagnificationGestureRecognizer) {
-        guard window != nil else { return }
-        let factor = max(0.8, min(1.2, 1 + gesture.magnification)); gesture.magnification = 0
-        emit(["kind": "hostCommand", "action": "zoom", "factor": factor])
     }
     private func setReadingMode(_ enabled: Bool) {
         readingEnabled = enabled
@@ -437,19 +452,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         return "doc"
     }
     private func sendRecentLocations() {
-        guard ready else { return }; recentIDs.removeAll()
+        guard ready else { return }
+        let existing = Dictionary(uniqueKeysWithValues: recentIDs.map { ($0.value, $0.key) })
+        recentIDs.removeAll()
         let items: [[String: Any]] = recent.visibleURLs(includeWorkspaceFiles: preferences["showWorkspaceRecents"] as? Bool == true).map { url in
-            let id = UUID().uuidString; recentIDs[id] = url
+            let id = existing[url] ?? UUID().uuidString; recentIDs[id] = url
             return ["id": id, "name": url.lastPathComponent, "path": url.path, "directory": url.hasDirectoryPath]
         }
         emit(["kind": "recentLocations", "items": items])
     }
-    private func openLocation(_ url: URL, preview: Bool = false, requestID: String = "", workspaceEntry: (id: String, generation: String, identity: FileIdentity)? = nil, fragment: String? = nil) async {
+    private func openRecent(_ url: URL) {
+        guard openingRecents.insert(url).inserted else { return }
+        Task { @MainActor in
+            defer { openingRecents.remove(url) }
+            await openLocation(url, fromRecent: true)
+        }
+    }
+    private func recentOpenFailure(_ url: URL) {
+        var info = stat()
+        let missing = url.withUnsafeFileSystemRepresentation { path -> Bool in
+            guard let path, fstatat(AT_FDCWD, path, &info, 0) != 0 else { return false }
+            return errno == ENOENT || errno == ENOTDIR
+        }
+        let name = url.lastPathComponent
+        let text = missing
+            ? settings.text("找不到“\(name)”。它可能已被移动或删除。", "“\(name)” could not be found. It may have been moved or deleted.")
+            : settings.text("无法打开“\(name)”。请检查它是否可访问，再试一次。", "“\(name)” could not be opened. Check that it is accessible, then try again.")
+        var payload: [String: Any] = ["kind": "recentOpenFailure", "text": text]
+        if missing, let entry = recentIDs.first(where: { $0.value == url }) { payload["entryID"] = entry.key }
+        emit(payload)
+    }
+    private func openLocation(_ url: URL, preview: Bool = false, requestID: String = "", workspaceEntry: (id: String, generation: String, identity: FileIdentity)? = nil, fragment: String? = nil, fromRecent: Bool = false) async {
         guard closeRequest == nil else { return }
         opening += 1; defer { opening -= 1 }
-        await locationOpenQueue.perform { await self.performOpenLocation(url, preview: preview, requestID: requestID, workspaceEntry: workspaceEntry, fragment: fragment) }
+        await locationOpenQueue.perform { await self.performOpenLocation(url, preview: preview, requestID: requestID, workspaceEntry: workspaceEntry, fragment: fragment, fromRecent: fromRecent) }
     }
-    private func performOpenLocation(_ url: URL, preview: Bool, requestID: String, workspaceEntry: (id: String, generation: String, identity: FileIdentity)?, fragment: String? = nil) async {
+    private func performOpenLocation(_ url: URL, preview: Bool, requestID: String, workspaceEntry: (id: String, generation: String, identity: FileIdentity)?, fragment: String?, fromRecent: Bool) async {
         guard closeRequest == nil else { return }
         do {
             if !requestID.isEmpty && latestWorkspaceRequest != requestID { return }
@@ -484,6 +522,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
             recent.note(url, fromWorkspace: workspaceEntry != nil); updateRecentMenu()
         } catch {
             record("locationOpenFailure", error)
+            if fromRecent { recentOpenFailure(url); return }
             if !requestID.isEmpty && latestWorkspaceRequest != requestID { return }
             if !requestID.isEmpty { emit(["kind": "openFailed", "openRequestID": requestID]) }
             notice(settings.text("无法打开文件或文件夹：", "Cannot open file or folder: ") + l(String(describing: error)))
@@ -656,11 +695,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         emit(["kind": "pasteReceipt", "documentID": documentID, "requestID": id, "outcome": "cancelled"])
     }
 
-    private func readImage(_ reference: String, documentID: String) async throws -> LocalImage {
+    private func readImage(_ reference: String, documentID: String, cachedOnly: Bool = false) async throws -> LocalImage {
         guard documents[documentID]?.isMarkdown == true else { throw ImageStoreFailure.denied }
         let prefix = "markfine://app/image/" + documentID + "/"
         if reference.hasPrefix(prefix), let path = String(reference.dropFirst(prefix.count)).removingPercentEncoding { return try await images.read(documentID: documentID, relativePath: path) }
-        if let source = EditorScheme.remoteSource(reference, documentID: documentID) { return try await remoteImages.read(documentID: documentID, source: source) }
+        if let source = EditorScheme.remoteSource(reference, documentID: documentID) {
+            if cachedOnly { return try await remoteImages.readCached(documentID: documentID, source: source) }
+            return try await remoteImages.read(documentID: documentID, source: source)
+        }
         throw ImageStoreFailure.denied
     }
     private func beginCopy(_ command: [String: Any]) {
@@ -692,13 +734,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         do {
             guard !copiedRequests.contains(request), documents[id] != nil, clipboardGeneration == reservation.generation else { throw ImageStoreFailure.denied }
             copiedRequests.append(request); if copiedRequests.count > 128 { copiedRequests.removeFirst() }
-            let markdown = command["markdown"] as! String
             let contents: ClipboardContents
-            if documents[id]?.isMarkdown == false || command["raw"] as? Bool == true { contents = ClipboardContents(values: [.string: Data(markdown.utf8)]) }
-            else {
-                let options = ExportOptions(chinese: settings.values["fontChinese"] as? String ?? "PingFangSC-Regular", english: settings.values["fontEnglish"] as? String ?? "PingFangSC-Regular")
-                contents = try await RichClipboard.make(markdown: markdown, snapshot: command["snapshot"] as! [String: Any], options: options) { try await self.readImage($0, documentID: id) }
-            }
+            if let reference = command["resource"] as? String {
+                if command["kind"] as? String == "copyImageLink" {
+                    let prefix = "markfine://app/image/\(id)/"
+                    guard documents[id]?.isMarkdown == true, reference.hasPrefix(prefix),
+                          let relative = String(reference.dropFirst(prefix.count)).removingPercentEncoding else { throw ImageStoreFailure.denied }
+                    let path = try await images.absolutePath(documentID: id, relativePath: relative)
+                    contents = ClipboardContents(values: [.string: Data(path.utf8)])
+                } else {
+                    let image = try await readImage(reference, documentID: id, cachedOnly: true)
+                    guard let type = UTType(mimeType: image.mime), type.conforms(to: .image) else { throw ImageStoreFailure.denied }
+                    contents = ClipboardContents(values: [NSPasteboard.PasteboardType(type.identifier): image.data])
+                }
+            } else if let markdown = command["markdown"] as? String {
+                if documents[id]?.isMarkdown == false || command["raw"] as? Bool == true { contents = ClipboardContents(values: [.string: Data(markdown.utf8)]) }
+                else {
+                    let options = ExportOptions(chinese: settings.values["fontChinese"] as? String ?? "PingFangSC-Regular", english: settings.values["fontEnglish"] as? String ?? "PingFangSC-Regular")
+                    contents = try await RichClipboard.make(markdown: markdown, snapshot: command["snapshot"] as! [String: Any], options: options) { try await self.readImage($0, documentID: id) }
+                }
+            } else { throw BridgeFailure.malformed }
             guard documents[id] != nil, clipboardGeneration == reservation.generation, NSPasteboard.general.changeCount == reservation.changeCount else { throw ImageStoreFailure.denied }
             try contents.write(to: .general); receipt["outcome"] = "success"
         } catch { record("clipboardCopyFailure", error); receipt["error"] = settings.text("复制未完成，请检查图片资源或稍后重试。", "Copy did not finish. Check the image resources or try again.") }
@@ -707,7 +762,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     private func closeDocument(_ command: [String: Any]) async {
         let id = command["documentID"] as! String, request = command["requestID"] as! String, revision = command["revision"] as! Int
         var approved = false
-        if !saving.contains(id), !outputController.busy, pasteTask?.documentID != id, !copying.contains(id), states[id]?.revision == revision, states[id]?.pending == false {
+        if !saving.contains(id), !outputController.busy, !savingDiagram, pasteTask?.documentID != id, !copying.contains(id), states[id]?.revision == revision, states[id]?.pending == false {
             do { if unsupportedFiles[id] != nil { unsupportedFiles[id] = nil } else { try await store.closeDocument(id); rememberClosedPosition(id); await remoteImages.close(id); await images.closeDocument(id) }; documents[id] = nil; states[id] = nil; pendingPositions[id] = nil; approved = true }
             catch { record("documentCloseFailure", error); notice(l(String(describing: error))) }
         }
@@ -715,7 +770,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         updateWindowTitle()
     }
     private func requestCloseAll(terminating: Bool) {
-        guard ready, opening == 0, saving.isEmpty, pasteTask == nil, copying.isEmpty, !outputController.busy else { notice(settings.text("请先等待保存、图片或导出任务完成，再关闭/退出", "Wait for saving, image processing or document output before closing / quitting")); return }
+        guard ready, opening == 0, saving.isEmpty, pasteTask == nil, copying.isEmpty, !outputController.busy, !savingDiagram else { notice(settings.text("请先等待保存、图片或导出任务完成，再关闭/退出", "Wait for saving, image processing or document output before closing / quitting")); return }
         if let current = closeRequest { if terminating { closeRequest = (current.id, true) }; return }
         let request = UUID().uuidString; closeRequest = (request, terminating)
         emit(["kind": "hostCommand", "action": "closeAll", "requestID": request])
@@ -745,7 +800,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if closeApproved || (!ready && documents.isEmpty && opening == 0) { return .terminateNow }
-        guard opening == 0, saving.isEmpty, pasteTask == nil, copying.isEmpty, !outputController.busy else { notice(settings.text("请先等待保存、图片或导出任务完成", "Wait for saving, image processing or document output")); return .terminateCancel }
+        guard opening == 0, saving.isEmpty, pasteTask == nil, copying.isEmpty, !outputController.busy, !savingDiagram else { notice(settings.text("请先等待保存、图片或导出任务完成", "Wait for saving, image processing or document output")); return .terminateCancel }
         requestCloseAll(terminating: true)
         return closeRequest == nil ? .terminateCancel : .terminateLater
     }
@@ -762,7 +817,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
                 Task { @MainActor in do { try await initializeEditor() } catch { fail("initializeFailure", error) } }
             case "new": Task { @MainActor in await createDocument() }
             case "open": Task { @MainActor in await chooseOpen() }
-            case "openRecent": if let url = recentIDs[command["entryID"] as! String] { Task { @MainActor in await openLocation(url) } }
+            case "openRecent": if let url = recentIDs[command["entryID"] as! String] { openRecent(url) }
             case "home": latestWorkspaceRequest = nil; activeDocumentID = nil; updateWindowTitle()
             case "removeRecent":
                 let ids = command["entryIDs"] as! [String]
@@ -772,6 +827,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
             case "rememberPosition":
                 pendingPositions[command["documentID"] as! String] = ReadingPosition(mode: command["mode"] as! String, line: command["line"] as! Int, fraction: command["fraction"] as! Double)
             case "exportDocument": Task { @MainActor in await exportDocument(command) }
+            case "diagramResources": Task { @MainActor in await diagramResources(command) }
+            case "saveDiagramPNG": Task { @MainActor in await saveDiagramPNG(command) }
             case "diagnostic": record("editor." + (command["event"] as! String))
             case "closeEmptyWindow": if documents.isEmpty && unsupportedFiles.isEmpty && initialLoadFinished { requestCloseAll(terminating: false) }
             case "workspaceChildren": Task { @MainActor in await workspaceChildren(command) }
@@ -814,7 +871,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
             case "closeAllResult": Task { @MainActor in await finishCloseAll(command) }
             case "paste": startPaste(command)
             case "resolvePaste": resolvePaste(command)
-            case "copyFragment": Task { @MainActor in await copyFragment(command) }
+            case "copyFragment", "copyImage", "copyImageLink": Task { @MainActor in await copyFragment(command) }
             case "beginCopy": beginCopy(command)
             case "abortCopy": abortCopy(command)
             case "cancelPaste":
@@ -853,7 +910,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     }
     private func exportDocument(_ command: [String: Any]) async {
         let id = command["documentID"] as! String
-        guard let window, let metadata = documents[id], closeRequest == nil, pasteTask?.documentID != id, !outputController.busy else { return }
+        guard let window, let metadata = documents[id], closeRequest == nil, pasteTask?.documentID != id, !outputController.busy, !savingDiagram else { return }
         do {
             let mode = command["mode"] as! String
             let result = try await outputController.perform(window: window, documentURL: metadata.url, title: metadata.url == nil ? l("未命名") : metadata.title, printing: command["printing"] as! Bool, lineHeight: settings.lineHeight(reading: mode == "read", source: mode == "source"), confirmed: { await self.notifications.prepare() }, snapshot: {
@@ -867,6 +924,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
             notice(settings.text("导出／打印未完成：请检查排版参数、字体、图片或输出位置。", "Export / Print did not finish. Check layout options, fonts, images or the output location.") + " " + String(describing: error))
             if command["printing"] as? Bool == false { await notifications.send(success: false, name: metadata.title, english: settings.english) }
         }
+    }
+    private func diagramResources(_ command: [String: Any]) async {
+        let id = command["documentID"] as! String
+        var reply: [String: Any] = ["kind": "diagramReceipt", "requestID": command["requestID"]!, "outcome": "failure"]
+        defer { emit(reply) }
+        do {
+            guard activeDocumentID == id, closeRequest == nil else { return }
+            var result: [String: String] = [:], inputBytes = 0, outputBytes = 0
+            for reference in command["resources"] as! [String] {
+                guard reference.hasPrefix("markfine://app/image/\(id)/") else { throw ImageStoreFailure.denied }
+                let local = try await readImage(reference, documentID: id)
+                inputBytes += local.data.count
+                guard inputBytes <= 32 * 1_048_576 else { throw DocumentExportFailure.tooLarge }
+                let image = try await Task.detached { try ExportRaster.png(local.data) }.value
+                outputBytes += image.data.count
+                guard outputBytes <= 12 * 1_048_576 else { throw DocumentExportFailure.tooLarge }
+                result[reference] = "data:image/png;base64," + image.data.base64EncodedString()
+            }
+            reply["resources"] = result
+            reply["outcome"] = "success"
+        } catch { record("diagramResourcesFailure", error) }
+    }
+    private func saveDiagramPNG(_ command: [String: Any]) async {
+        let id = command["documentID"] as! String, request = command["requestID"] as! String
+        var reply: [String: Any] = ["kind": "diagramReceipt", "requestID": request, "outcome": "failure"]
+        defer { emit(reply) }
+        guard let window, window.attachedSheet == nil, let document = documents[id], document.isMarkdown,
+              activeDocumentID == id, closeRequest == nil, !savingDiagram, !outputController.busy,
+              !diagramSaveRequests.contains(request) else { return }
+        savingDiagram = true; defer { savingDiagram = false }
+        diagramSaveRequests.append(request); if diagramSaveRequests.count > 128 { diagramSaveRequests.removeFirst() }
+        do {
+            let encoded = command["png"] as! String
+            let data = try await Task.detached { () throws -> Data in
+                guard let data = Data(base64Encoded: encoded), let image = CGImageSourceCreateWithData(data as CFData, nil),
+                      CGImageSourceGetType(image) as String? == UTType.png.identifier, CGImageSourceGetCount(image) == 1,
+                      let properties = CGImageSourceCopyPropertiesAtIndex(image, 0, nil) as? [CFString: Any],
+                      let width = properties[kCGImagePropertyPixelWidth] as? Int, let height = properties[kCGImagePropertyPixelHeight] as? Int,
+                      (1...8192).contains(width), (1...8192).contains(height), width * height <= 16_000_000,
+                      CGImageSourceGetStatusAtIndex(image, 0) == .statusComplete else { throw DocumentExportFailure.invalidImage }
+                return data
+            }.value
+            guard window.attachedSheet == nil, activeDocumentID == id else { return }
+            let panel = NSSavePanel()
+            panel.title = settings.text("保存流程图 PNG", "Save Diagram PNG")
+            panel.allowedContentTypes = [.png]
+            panel.canCreateDirectories = true
+            panel.directoryURL = document.url?.deletingLastPathComponent()
+            let name = document.url.map { $0.deletingPathExtension().lastPathComponent } ?? "Mermaid"
+            panel.nameFieldStringValue = name + "-diagram.png"
+            let response: NSApplication.ModalResponse = await withCheckedContinuation { continuation in
+                panel.beginSheetModal(for: window) { continuation.resume(returning: $0) }
+            }
+            guard response == .OK, let url = panel.url else { reply["outcome"] = "cancelled"; return }
+            let target = url.standardizedFileURL.resolvingSymlinksInPath()
+            guard url.pathExtension.lowercased() == "png", !documents.values.contains(where: { $0.url?.standardizedFileURL.resolvingSymlinksInPath() == target }) else {
+                throw CocoaError(.fileWriteInvalidFileName)
+            }
+            try await Task.detached { try data.write(to: url, options: .atomic) }.value
+            reply["outcome"] = "success"
+            let english = settings.english
+            Task { [notifications] in
+                await notifications.prepare()
+                await notifications.sendSavedDiagram(fileURL: url, english: english)
+            }
+        } catch { record("diagramPNGFailure", error) }
     }
     private func deliver(_ fields: [String: Any]) async throws -> Any {
         try await withCheckedThrowingContinuation { continuation in enqueueDelivery(fields) { continuation.resume(with: $0) } }

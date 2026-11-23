@@ -223,20 +223,30 @@ public actor ImageStore {
         return relative
     }
 
-    public func read(documentID: String, relativePath: String) throws -> LocalImage {
+    private func location(documentID: String, relativePath: String) throws -> (root: URL, relative: String) {
         guard let document = documents[documentID] else { throw ImageStoreFailure.denied }
         let path = try Self.checkedPath(relativePath)
-        let data: Data
         if path.hasPrefix("markfine-staging/"), document.staged.contains(String(path.dropFirst("markfine-staging/".count))) {
-            data = try Self.readData(root: session.appendingPathComponent(documentID, isDirectory: true), relative: String(path.dropFirst("markfine-staging/".count)))
-        } else {
-            guard let url = document.url else { throw ImageStoreFailure.denied }
-            let root = url.deletingLastPathComponent().resolvingSymlinksInPath()
-            let resolved = root.appendingPathComponent(path).resolvingSymlinksInPath()
-            let rootParts = root.pathComponents, parts = resolved.pathComponents
-            guard parts.count > rootParts.count, Array(parts.prefix(rootParts.count)) == rootParts else { throw ImageStoreFailure.denied }
-            data = try Self.readData(root: root, relative: parts.dropFirst(rootParts.count).joined(separator: "/"))
+            return (session.appendingPathComponent(documentID, isDirectory: true), String(path.dropFirst("markfine-staging/".count)))
         }
+        guard let url = document.url else { throw ImageStoreFailure.denied }
+        let root = url.deletingLastPathComponent().resolvingSymlinksInPath()
+        let resolved = root.appendingPathComponent(path).resolvingSymlinksInPath()
+        let rootParts = root.pathComponents, parts = resolved.pathComponents
+        guard parts.count > rootParts.count, Array(parts.prefix(rootParts.count)) == rootParts else { throw ImageStoreFailure.denied }
+        return (root, parts.dropFirst(rootParts.count).joined(separator: "/"))
+    }
+
+    /// A clipboard path is text, not a file grant. Resolve it using the same
+    /// document scope as preview without reading the file or fetching a URL.
+    public func absolutePath(documentID: String, relativePath: String) throws -> String {
+        let value = try location(documentID: documentID, relativePath: relativePath)
+        return value.root.appendingPathComponent(try Self.checkedPath(value.relative), isDirectory: false).path
+    }
+
+    public func read(documentID: String, relativePath: String) throws -> LocalImage {
+        let value = try location(documentID: documentID, relativePath: relativePath)
+        let data = try Self.readData(root: value.root, relative: value.relative)
         guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
               let type = CGImageSourceGetType(source) as String? else { throw ImageStoreFailure.invalidImage }
         let allowed: [String: String] = [UTType.png.identifier: "image/png", UTType.jpeg.identifier: "image/jpeg", UTType.tiff.identifier: "image/tiff",

@@ -27,7 +27,7 @@ The paragraph you are editing stays clear while the rest fades into the backgrou
 
 Headings retain their size as you edit, and tables remain editable within their cells. Links normally show only their labels; moving the cursor into a link reveals its full syntax, which folds away again when you leave.
 
-Switch to source mode whenever you need to work directly with Markdown syntax, while keeping the same text, selection and undo history.
+Switch to source mode to edit Markdown with syntax highlighting while keeping the same text, selection and undo history.
 
 ### Reading, whenever you need it
 
@@ -41,11 +41,15 @@ Copy, cut or delete an entire chapter directly from the outline, including its s
 
 Copied content can include formatting and local images. When pasted into another Markfine document, the images are imported into that document's attachment directory.
 
+Right-click an image to copy the original, the absolute path of a local image, or the link to a remote image.
+
+In Live editing mode, click an image to edit its Markdown reference. The reference collapses when the caret leaves it.
+
 ### Edit diagrams with a live preview
 
 When editing Mermaid, the source stays above the diagram. If the source contains an error, the last valid diagram remains visible with an error message.
 
-Open a diagram in a larger view, zoom it independently and drag to explore without changing the document zoom. Flowcharts, sequence diagrams, class diagrams, state diagrams, ER diagrams and Gantt charts are all generated offline.
+Open a diagram in a larger view, zoom it independently and drag to explore without changing the document zoom. Use the preview toolbar to save the entire diagram as a PNG at 100% size. Flowcharts, sequence diagrams, class diagrams, state diagrams, ER diagrams and Gantt charts are all generated offline.
 
 ### Export and Quick Look
 

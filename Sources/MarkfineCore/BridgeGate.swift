@@ -33,6 +33,8 @@ public struct BridgeGate {
         case "removeRecent": fields = ["entryIDs"]
         case "rememberPosition": fields = ["documentID", "mode", "line", "fraction"]
         case "exportDocument": fields = ["documentID", "printing", "mode"]
+        case "diagramResources": fields = ["documentID", "requestID", "resources"]
+        case "saveDiagramPNG": fields = ["documentID", "requestID", "png"]
         case "diagnostic": fields = ["event"]
         case "openUnsupported": fields = ["documentID"]
         case "readingMode": fields = ["enabled"]
@@ -48,6 +50,7 @@ public struct BridgeGate {
         case "beginCopy": fields = ["documentID", "requestID"]
         case "abortCopy": fields = ["documentID", "ticket"]
         case "copyFragment": fields = ["documentID", "requestID", "ticket", "revision", "markdown", "snapshot", "raw"]
+        case "copyImage", "copyImageLink": fields = ["documentID", "requestID", "ticket", "resource"]
         case "cancelPaste": fields = ["documentID", "requestID"]
         default: throw BridgeFailure.malformed
         }
@@ -80,6 +83,17 @@ public struct BridgeGate {
                   let resources = snapshot["resources"] as? [String], resources.count <= 512, resources.allSatisfy({ $0.utf8.count <= 12_000 }),
                   let bindings = snapshot["imageBindings"] as? [[String: String]], bindings.count <= 512,
                   bindings.allSatisfy({ Set($0.keys) == ["source", "resource"] && $0.values.allSatisfy({ $0.utf8.count <= 12_000 }) }) else { throw BridgeFailure.malformed }
+        }
+        if kind == "copyImage" || kind == "copyImageLink" {
+            guard let resource = object["resource"] as? String, !resource.isEmpty, resource.utf8.count <= 12_000 else { throw BridgeFailure.malformed }
+        }
+        if kind == "diagramResources" {
+            guard let resources = object["resources"] as? [String], (1...24).contains(resources.count), Set(resources).count == resources.count,
+                  resources.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 12_000 }) else { throw BridgeFailure.malformed }
+        }
+        if kind == "saveDiagramPNG" {
+            guard let data = object["png"] as? String, data.utf8.count <= 32 * 1_048_576,
+                  data.hasPrefix("iVBORw0KGgo") else { throw BridgeFailure.malformed }
         }
         if kind == "exportDocument", !boolean(object["printing"]) { throw BridgeFailure.malformed }
         if kind == "exportDocument", !["edit", "source", "read"].contains(object["mode"] as? String ?? "") { throw BridgeFailure.malformed }
