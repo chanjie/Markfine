@@ -78,7 +78,7 @@ final class PreferencesController: NSObject, NSComboBoxDataSource, NSComboBoxDel
             combo.stringValue = fonts.first { $0.value == values[key] as? String }?.title ?? settings.text("苹方（默认）", "PingFang (default)")
             row.addArrangedSubview(label); row.addArrangedSubview(combo); stack.addArrangedSubview(row)
         }
-        let themes = [(settings.text("纸质效果", "Paper"), "paper"), (settings.text("牛皮纸效果", "Kraft paper"), "kraft"), (settings.text("护眼效果", "Soft green"), "eye")]
+        let themes = [(settings.text("纯白", "Pure white"), "white"), (settings.text("纸质效果", "Paper"), "paper"), (settings.text("牛皮纸效果", "Kraft paper"), "kraft"), (settings.text("护眼效果", "Soft green"), "eye")]
         popup("编辑页面", "Editing theme", key: "editTheme", choices: themes)
         popup("阅读页面", "Reading theme", key: "readTheme", choices: themes)
         spacingFields.removeAll()

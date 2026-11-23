@@ -5,11 +5,12 @@ import Foundation
 public final class ApplicationSettings {
     public static let bodyLineHeight = 1.85
     public static let editingLineHeight = 1.4
+    public static let defaultPageTheme = "white"
     private let defaults: UserDefaults
     public static let initial: [String: Any] = [
         "shortcutHints": true, "focusMode": true, "lineNumbers": false, "showAllFiles": false, "showWorkspaceRecents": false, "recentLimit": 20,
         "language": "system", "timeZone": "local", "fontChinese": "PingFangSC-Regular", "fontEnglish": "PingFangSC-Regular",
-        "appearance": "system", "editTheme": "paper", "readTheme": "paper", "outlineSide": "left", "filesSide": "left", "outlineWidth": 220.0,
+        "appearance": "system", "editTheme": defaultPageTheme, "readTheme": defaultPageTheme, "outlineSide": "left", "filesSide": "left", "outlineWidth": 220.0,
         "leftWidth": 220.0, "rightWidth": 220.0, "editLineSpacing": 1.3, "readLineSpacing": 1.3, "editZoom": 1.0, "readZoom": 1.0
     ]
     private static let exportKeys = ["exportLayout.pdf", "exportLayout.docx", "exportLastFormat"]
@@ -75,7 +76,7 @@ public final class ApplicationSettings {
         case "timeZone": return ["local", "UTC"].contains(value as? String ?? "")
         case "appearance": return ["system", "light", "dark"].contains(value as? String ?? "")
         case "outlineSide", "filesSide": return ["left", "right"].contains(value as? String ?? "")
-        case "editTheme", "readTheme": return ["paper", "kraft", "eye"].contains(value as? String ?? "")
+        case "editTheme", "readTheme": return ["white", "paper", "kraft", "eye"].contains(value as? String ?? "")
         case "fontChinese", "fontEnglish":
             guard let name = value as? String else { return false }
             return !name.isEmpty && name.utf16.count <= 128 && name.rangeOfCharacter(from: .controlCharacters) == nil

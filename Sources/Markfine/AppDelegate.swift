@@ -340,13 +340,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     private func updateBackground() {
         let appearance = preferences["appearance"] as? String ?? "system"
         NSApp.appearance = appearance == "dark" ? NSAppearance(named: .darkAqua) : appearance == "light" ? NSAppearance(named: .aqua) : nil
-        let theme = preferences[readingEnabled ? "readTheme" : "editTheme"] as? String ?? "paper"
-        let color = NSColor(name: nil) { appearance in
-            if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua { return NSColor(srgbRed: 0.102, green: 0.118, blue: 0.110, alpha: 1) }
-            return theme == "kraft" ? NSColor(srgbRed: 0.878, green: 0.788, blue: 0.631, alpha: 1) : theme == "eye" ? NSColor(srgbRed: 0.898, green: 0.933, blue: 0.890, alpha: 1) : NSColor(srgbRed: 0.969, green: 0.953, blue: 0.906, alpha: 1)
-        }
+        let theme = preferences[readingEnabled ? "readTheme" : "editTheme"] as? String ?? ApplicationSettings.defaultPageTheme
         window?.backgroundColor = windowPaper.background(theme: theme, resources: resources)
-        webView.underPageBackgroundColor = color // WK's page fallback remains a solid color, not an NSColor pattern.
+        webView.underPageBackgroundColor = windowPaper.solidBackground(theme: theme) // WK's page fallback cannot use a pattern.
     }
     private func openLink(_ command: [String: Any]) {
         guard let id = command["documentID"] as? String, let metadata = documents[id], let href = command["href"] as? String, let request = command["requestID"] as? String else { return }

@@ -61,7 +61,7 @@ Return Home without closing open documents or the folder. Remove recent location
 
 ### Separate appearance settings for writing and reading
 
-Choose Paper or Kraft themes with static paper textures, an eye-comfort theme, or a dark appearance.
+In light appearance, choose separate backgrounds for editing and reading: Pure white (default), textured Paper and Kraft paper, or Soft green. Dark appearance is also available.
 
 Writing and reading have independent theme, line spacing and zoom settings. Chinese and Latin fonts can also be selected separately.
 

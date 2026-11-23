@@ -2,7 +2,8 @@ import { StateEffect, StateField } from '@codemirror/state';
 
 export interface EditorPreferences { shortcutHints: boolean; focusMode: boolean; lineNumbers?: boolean }
 export const defaultPreferences: EditorPreferences = { shortcutHints: true, focusMode: true };
-export type PageTheme = 'paper' | 'kraft' | 'eye';
+const pageThemes = ['white', 'paper', 'kraft', 'eye'] as const;
+export type PageTheme = typeof pageThemes[number];
 export interface ApplicationPreferences extends EditorPreferences {
   language: 'system' | 'zh-Hans' | 'en'; locale: 'zh-Hans' | 'en'; timeZone: 'local' | 'UTC';
   fontChinese: string; fontEnglish: string; editTheme: PageTheme; readTheme: PageTheme;
@@ -13,7 +14,7 @@ export const bodyLineHeight = 1.85;
 export const editingLineHeight = 1.4;
 export const defaultApplicationPreferences: ApplicationPreferences = {
   ...defaultPreferences, language: 'system', locale: 'zh-Hans', timeZone: 'local',
-  fontChinese: 'PingFangSC-Regular', fontEnglish: 'PingFangSC-Regular', editTheme: 'paper', readTheme: 'paper',
+  fontChinese: 'PingFangSC-Regular', fontEnglish: 'PingFangSC-Regular', editTheme: 'white', readTheme: 'white',
   lineNumbers: false, showAllFiles: false, showWorkspaceRecents: false, outlineSide: 'left', filesSide: 'left', outlineWidth: 220, editZoom: 1, readZoom: 1,
   appearance: 'system', leftWidth: 220, rightWidth: 220, editLineSpacing: 1.3, readLineSpacing: 1.3
 };
@@ -24,7 +25,10 @@ export function normalizePreferences(value: unknown, previous = defaultApplicati
   for (const key of ['shortcutHints', 'focusMode', 'lineNumbers', 'showAllFiles', 'showWorkspaceRecents'] as const) if (typeof input[key] === 'boolean') result[key] = input[key];
   if (input.outlineSide === 'left' || input.outlineSide === 'right') result.outlineSide = input.outlineSide;
   if (input.filesSide === 'left' || input.filesSide === 'right') result.filesSide = input.filesSide;
-  for (const key of ['editTheme', 'readTheme'] as const) if (['paper', 'kraft', 'eye'].includes(String(input[key]))) result[key] = input[key] as PageTheme;
+  for (const key of ['editTheme', 'readTheme'] as const) {
+    const theme = pageThemes.find(theme => theme === input[key]);
+    if (theme) result[key] = theme;
+  }
   if (['system', 'zh-Hans', 'en'].includes(String(input.language))) result.language = input.language as ApplicationPreferences['language'];
   if (['zh-Hans', 'en'].includes(String(input.locale))) result.locale = input.locale as ApplicationPreferences['locale'];
   else if (result.language !== 'system') result.locale = result.language;

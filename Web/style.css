@@ -1,4 +1,5 @@
-:root { color-scheme:light; --paper:#f7f3e7; --canvas:#f0eade; --ink:#303b34; --muted:#727b72; --line:#dedbd0; --accent:#466c55; --wash:#e9ede3; --hover:#eeeFE7; --warning:#946232; --content-zoom:1; --outline-width:220px; --body-font:"Markfine Latin","Markfine CJK","PingFang SC",sans-serif; font:13px "PingFang SC",sans-serif; color:var(--ink); background:var(--paper); }
+:root { color-scheme:light; --paper:#fff; --canvas:#f1f3f1; --ink:#303b34; --muted:#727b72; --line:#dedbd0; --accent:#466c55; --wash:#e9ede3; --hover:#eeeFE7; --warning:#946232; --content-zoom:1; --outline-width:220px; --body-font:"Markfine Latin","Markfine CJK","PingFang SC",sans-serif; font:13px "PingFang SC",sans-serif; color:var(--ink); background:var(--paper); }
+:root[data-theme=paper] { --paper:#f7f3e7; --canvas:#f0eade; }
 :root[data-theme=kraft] { --paper:#e0c9a1; --canvas:#d6bd91; --ink:#493c2d; --muted:#7a674f; --line:#cbb18a; --accent:#765538; --wash:#d9c298; --hover:#d9c298; }
 :root[data-theme=eye] { --paper:#e5eee3; --canvas:#dce8d8; --ink:#2c4132; --muted:#5c725f; --line:#c6d7c3; --accent:#356442; --wash:#d1e1cd; --hover:#d8e6d3; }
 * { box-sizing:border-box; scrollbar-width:none; }
@@ -143,7 +144,8 @@ body { position:relative; isolation:isolate; }
 :root[data-appearance=dark] { color-scheme:dark; --paper:#1a1e1c; --canvas:#222924; --ink:#dce3dc; --muted:#9ca99e; --line:#3b463e; --accent:#acd1b0; --wash:#303d33; --hover:#2a342d; --warning:#dfb17b; --comment:#9bad8d; }
 /* Original 2x pulp materials: embedded fibers, pressed patches and raking-light tooth.
    Rasterized once at authoring time, not SVG turbulence or animated runtime filtering. */
-body::before { content:""; position:fixed; inset:0; pointer-events:none; z-index:-1; opacity:1; background-image:url("paper-texture.png"); background-size:512px 512px; background-repeat:repeat; }
+:root:is([data-theme=paper],[data-theme=kraft]) body::before { content:""; position:fixed; inset:0; pointer-events:none; z-index:-1; opacity:1; background-size:512px 512px; background-repeat:repeat; }
+:root[data-theme=paper] body::before { background-image:url("paper-texture.png"); }
 :root[data-theme=kraft] body::before { background-image:url("kraft-texture.png"); }
 :root[data-theme=eye] body::before,:root[data-appearance=dark] body::before { display:none; }
 #editor>.cm-editor>.cm-scroller,.source-mode #editor>.cm-editor>.cm-scroller,.reading-content { line-height:var(--body-line-height); }
